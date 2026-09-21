@@ -1,0 +1,62 @@
+# Environment files and secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+
+# Compiled binaries and test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+
+# Go workspaces and vendoring
+vendor/
+go.work
+go.work.sum
+
+# Temporary and log files
+tmp/
+temp/
+*.log
+*.tmp
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Database / Docker volumes
+pgdata/
+mongo-data/
+redis-data/
+
+# Audio and media files
+*.mp3
+*.wav
+*.pcm
+*.m4a
+*.ogg
+*.webm
+
+# Temporary workspace & scratch
+scratch/
+
+# Service binaries
+services/job-candidate-service/job-candidate-service
+services/interview-orchestrator/interview-orchestrator
+services/feedback-worker/feedback-worker
+services/notification-service/notification-service

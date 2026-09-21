@@ -1,0 +1,142 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: interview_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:3.7.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "127.0.0.1:9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate
+    volumes:
+      - ./migrations:/migrations
+    command: ["-path", "/migrations", "-database", "postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/interview_platform?sslmode=disable", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  job-candidate-service:
+    build: ./services/job-candidate-service
+    environment:
+      PORT: 8001
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/interview_platform?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      APP_DOMAIN: http://localhost:8080
+    ports:
+      - "127.0.0.1:8003:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  interview-orchestrator:
+    build: ./services/interview-orchestrator
+    environment:
+      PORT: 8002
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      JOB_CANDIDATE_SERVICE_URL: http://job-candidate-service:8001
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID}
+      INTERVIEW_DEMO_MODE: ${INTERVIEW_DEMO_MODE:-false}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      - "127.0.0.1:8004:8002"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  feedback-worker:
+    build: ./services/feedback-worker
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/interview_platform?sslmode=disable
+      JOB_CANDIDATE_SERVICE_URL: http://job-candidate-service:8001
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      FEEDBACK_LLM_MODE: ${FEEDBACK_LLM_MODE:-groq}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  notification-service:
+    build: ./services/notification-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/interview_platform?sslmode=disable
+      RESEND_API_KEY: ${RESEND_API_KEY}
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/app.js:/usr/share/nginx/html/app.js:ro
+      - ./frontend/styles.css:/usr/share/nginx/html/styles.css:ro
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      job-candidate-service:
+        condition: service_started
+      interview-orchestrator:
+        condition: service_started
+
+volumes:
+  pgdata:
