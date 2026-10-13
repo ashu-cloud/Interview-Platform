@@ -78,6 +78,16 @@ type RubricCriteria struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// DocumentChunk is one embedded piece of a blueprint's RAG knowledge base.
+type DocumentChunk struct {
+	BlueprintID uuid.UUID
+	OrgID       uuid.UUID
+	ChunkText   string
+	Embedding   []float32
+	ChunkIndex  int
+	Source      string
+}
+
 // Candidate represents an applicant.
 type Candidate struct {
 	ID        uuid.UUID `json:"id"`
@@ -232,12 +242,31 @@ type CreateDocketRequest struct {
 	Rubric       []RubricInput   `json:"rubric"        validate:"required,min=1,dive"`
 }
 
+// UpdateDocketRequest is the request body for a partial blueprint update.
+type UpdateDocketRequest struct {
+	Title        *string          `json:"title" validate:"omitempty,min=1"`
+	Instructions *string          `json:"instructions"`
+	DurationMins *int             `json:"duration_mins" validate:"omitempty,min=1"`
+	Questions    *[]QuestionInput `json:"questions" validate:"omitempty,min=1,dive"`
+	Rubric       *[]RubricInput   `json:"rubric" validate:"omitempty,min=1,dive"`
+}
+
 // ─── Candidate DTOs ───────────────────────────────────────────────────────────
 
 // CreateCandidateRequest is the request body for POST /api/v1/jobs/:job_id/candidates.
 type CreateCandidateRequest struct {
 	Email    string `json:"email"     validate:"required,email"`
 	FullName string `json:"full_name" validate:"required"`
+}
+
+// CreateSessionRequest creates or reuses the session for an existing invite.
+type CreateSessionRequest struct {
+	InviteID string `json:"invite_id" validate:"required,uuid"`
+}
+
+// CreateSessionResponse is the canonical assessment envelope for a session.
+type CreateSessionResponse struct {
+	Session Interview `json:"session"`
 }
 
 // ─── Invite DTOs ──────────────────────────────────────────────────────────────
@@ -336,10 +365,12 @@ type InterviewListResponse struct {
 
 // FeedbackScoreDetail is per-criterion score detail returned to hiring manager.
 type FeedbackScoreDetail struct {
-	CriterionName string `json:"criterion_name"`
-	Score         int    `json:"score"`
-	MaxScore      int    `json:"max_score"`
-	Evidence      string `json:"evidence"`
+	CriterionName  string  `json:"criterion_name"`
+	Score          int     `json:"score"`
+	MaxScore       int     `json:"max_score"`
+	Evidence       string  `json:"evidence"`
+	EvidenceTurnID *string `json:"evidence_turn_id,omitempty"`
+	IsGrounded     bool    `json:"is_grounded"`
 }
 
 // TranscriptTurn is a single turn in the interview transcript.
@@ -347,6 +378,29 @@ type TranscriptTurn struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// SessionTurn is one materialized assessment session turn.
+type SessionTurn struct {
+	ID         uuid.UUID `json:"id"`
+	SessionID  uuid.UUID `json:"session_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+	TurnNumber int       `json:"turn_number"`
+	Role       string    `json:"role"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// EvaluationJob is an evaluation request queued in outbox_completed.
+type EvaluationJob struct {
+	ID            uuid.UUID `json:"id"`
+	SessionID     uuid.UUID `json:"session_id"`
+	OrgID         uuid.UUID `json:"org_id"`
+	ParticipantID uuid.UUID `json:"participant_id"`
+	BlueprintID   uuid.UUID `json:"blueprint_id"`
+	TurnCount     int       `json:"turn_count"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // FeedbackDetailResponse is the response for GET /api/v1/interviews/:interview_id/feedback.
@@ -366,7 +420,7 @@ type FeedbackDetailResponse struct {
 // NOTE: This is a spec gap resolution — the spec does not define this endpoint
 // but requires the orchestrator to update interview status via job-candidate-service.
 type UpdateInterviewStatusRequest struct {
-	Status string `json:"status" validate:"required,oneof=in_progress completed feedback_ready"`
+	Status string `json:"status" validate:"required,oneof=in_progress completed feedback_ready evaluation_ready"`
 }
 
 // ─── Error DTOs ───────────────────────────────────────────────────────────────
