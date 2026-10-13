@@ -5,6 +5,7 @@
 *.env
 *.pem
 *.key
+frontend/env.js
 
 # Compiled binaries and test artifacts
 *.exe
@@ -60,3 +61,17 @@ services/job-candidate-service/job-candidate-service
 services/interview-orchestrator/interview-orchestrator
 services/feedback-worker/feedback-worker
 services/notification-service/notification-service
+
+MASTER-CONTEXT.md
+
+# Planning, AI agent configs, and local analysis docs
+.agents/
+.gemini/
+.planning/
+AGENTS.md
+frontend/AGENTS.md
+AI_INTERVIEW_PLATFORM_IMPLEMENTATION_AUDIT.md
+design.md
+stitch_screens/
+legacy_frontend/
+docs/
