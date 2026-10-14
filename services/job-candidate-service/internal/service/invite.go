@@ -93,9 +93,11 @@ func (s *InviteService) CreateInvite(
 		OrgID:       orgID.String(),
 		ExpiresAt:   expiresAt.Format(time.RFC3339),
 	}
-	if data, err := json.Marshal(cacheVal); err == nil {
-		if redisErr := s.redis.Set(ctx, inviteTokenCacheKeyPrefix+token, data, ttl).Err(); redisErr != nil {
-			slog.Warn("InviteService.CreateInvite: failed to cache invite", "token", token, "error", redisErr)
+	if s.redis != nil {
+		if data, err := json.Marshal(cacheVal); err == nil {
+			if redisErr := s.redis.Set(ctx, inviteTokenCacheKeyPrefix+token, data, ttl).Err(); redisErr != nil {
+				slog.Warn("InviteService.CreateInvite: failed to cache invite", "token", token, "error", redisErr)
+			}
 		}
 	}
 
@@ -107,20 +109,39 @@ func (s *InviteService) CreateInvite(
 	}, nil
 }
 
+// CreateSession validates an existing org-owned invite and idempotently reuses its session.
+func (s *InviteService) CreateSession(
+	ctx context.Context,
+	orgID uuid.UUID,
+	req *model.CreateSessionRequest,
+) (*model.CreateSessionResponse, error) {
+	inviteID, err := uuid.Parse(req.InviteID)
+	if err != nil {
+		return nil, fmt.Errorf("InviteService.CreateSession: parse invite_id: %w", apperror.ErrBadRequest)
+	}
+	interview, err := s.repo.CreateSession(ctx, orgID, inviteID)
+	if err != nil {
+		return nil, fmt.Errorf("InviteService.CreateSession: %w", err)
+	}
+	return &model.CreateSessionResponse{Session: *interview}, nil
+}
+
 // ValidateToken validates an invite token.
 // Tries Redis first; falls back to DB on cache miss.
 // Returns ErrNotFound for unknown tokens, ErrConflict for used/completed tokens.
 // In-progress interviews remain valid to permit candidates to reconnect.
 func (s *InviteService) ValidateToken(ctx context.Context, token string) (*model.InviteValidateResponse, error) {
-	// Try Redis cache first
-	raw, err := s.redis.Get(ctx, inviteTokenCacheKeyPrefix+token).Bytes()
-	if err == nil {
-		// Cache hit — token exists in Redis (not yet completed, not yet expired by TTL)
-		var cached model.InviteCacheValue
-		if jsonErr := json.Unmarshal(raw, &cached); jsonErr == nil {
-			expiresAt, _ := time.Parse(time.RFC3339, cached.ExpiresAt)
-			// Resolve candidate/job details from DB for full response
-			return s.buildValidateResponseFromDB(ctx, token, expiresAt)
+	// Try Redis cache first when configured.
+	if s.redis != nil {
+		raw, err := s.redis.Get(ctx, inviteTokenCacheKeyPrefix+token).Bytes()
+		if err == nil {
+			// Cache hit — token exists in Redis (not yet completed, not yet expired by TTL)
+			var cached model.InviteCacheValue
+			if jsonErr := json.Unmarshal(raw, &cached); jsonErr == nil {
+				expiresAt, _ := time.Parse(time.RFC3339, cached.ExpiresAt)
+				// Resolve candidate/job details from DB for full response
+				return s.buildValidateResponseFromDB(ctx, token, expiresAt)
+			}
 		}
 	}
 
@@ -141,7 +162,7 @@ func (s *InviteService) buildValidateResponseFromDB(
 	}
 
 	// Make sure a completed interview cannot be rejoined
-	if details.UsedAt != nil || details.InterviewStatus == "completed" || details.InterviewStatus == "feedback_ready" {
+	if details.UsedAt != nil || details.InterviewStatus == "completed" || details.InterviewStatus == "feedback_ready" || details.InterviewStatus == "evaluation_ready" {
 		return nil, fmt.Errorf("InviteService.ValidateToken: interview already completed: %w", apperror.ErrConflict)
 	}
 
@@ -189,9 +210,11 @@ func (s *InviteService) MarkInviteUsed(ctx context.Context, inviteID uuid.UUID) 
 	}
 
 	// Invalidate Redis cache — log on failure, do not propagate
-	if redisErr := s.redis.Del(ctx, inviteTokenCacheKeyPrefix+invite.Token).Err(); redisErr != nil {
-		slog.Warn("InviteService.MarkInviteUsed: failed to delete cache key",
-			"invite_id", inviteID, "error", redisErr)
+	if s.redis != nil {
+		if redisErr := s.redis.Del(ctx, inviteTokenCacheKeyPrefix+invite.Token).Err(); redisErr != nil {
+			slog.Warn("InviteService.MarkInviteUsed: failed to delete cache key",
+				"invite_id", inviteID, "error", redisErr)
+		}
 	}
 
 	return nil
@@ -214,13 +237,15 @@ func (s *InviteService) UpdateInterviewStatus(
 
 	// Only invalidate the invite / mark it consumed once the interview is actually completed
 	// and only if this instance actually transitioned the status
-	if changed && (req.Status == "completed" || req.Status == "feedback_ready") {
+	if changed && (req.Status == "completed" || req.Status == "feedback_ready" || req.Status == "evaluation_ready") {
 		invite, err := s.repo.GetInviteByInterviewID(ctx, interviewID)
 		if err == nil {
 			_ = s.repo.MarkUsed(ctx, invite.ID, time.Now().UTC())
-			if redisErr := s.redis.Del(ctx, inviteTokenCacheKeyPrefix+invite.Token).Err(); redisErr != nil {
-				slog.Warn("InviteService.UpdateInterviewStatus: failed to delete cache key",
-					"interview_id", interviewID, "error", redisErr)
+			if s.redis != nil {
+				if redisErr := s.redis.Del(ctx, inviteTokenCacheKeyPrefix+invite.Token).Err(); redisErr != nil {
+					slog.Warn("InviteService.UpdateInterviewStatus: failed to delete cache key",
+						"interview_id", interviewID, "error", redisErr)
+				}
 			}
 		}
 	}
@@ -264,6 +289,30 @@ func (s *InviteService) GetInterviewByID(
 		return nil, fmt.Errorf("InviteService.GetInterviewByID: %w", err)
 	}
 	return d, nil
+}
+
+// ListSessionTurns returns turns for a session scoped to the org.
+func (s *InviteService) ListSessionTurns(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+) ([]model.SessionTurn, error) {
+	turns, err := s.repo.ListSessionTurns(ctx, orgID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("InviteService.ListSessionTurns: %w", err)
+	}
+	return turns, nil
+}
+
+// EnqueueEvaluation queues evaluation for a completed, org-owned session.
+func (s *InviteService) EnqueueEvaluation(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+) (*model.EvaluationJob, error) {
+	job, err := s.repo.EnqueueEvaluation(ctx, orgID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("InviteService.EnqueueEvaluation: %w", err)
+	}
+	return job, nil
 }
 
 // GetFeedback returns the structured feedback for an interview.

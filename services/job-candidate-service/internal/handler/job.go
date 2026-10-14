@@ -65,6 +65,26 @@ func (h *JobHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// ListTracks returns the canonical tracks list envelope.
+func (h *JobHandler) ListTracks(c *gin.Context) {
+	orgID := middleware.GetOrgID(c)
+	status := c.Query("status")
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	resp, err := h.svc.ListJobs(c.Request.Context(), orgID, status, page, limit)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"tracks": resp.Jobs,
+		"total":  resp.Total,
+		"page":   resp.Page,
+		"limit":  resp.Limit,
+	})
+}
+
 // GetByID handles GET /api/v1/jobs/:job_id.
 func (h *JobHandler) GetByID(c *gin.Context) {
 	jobID, err := uuid.Parse(c.Param("job_id"))
@@ -111,4 +131,18 @@ func (h *JobHandler) Patch(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, job)
+}
+
+// Delete handles DELETE of a canonical track.
+func (h *JobHandler) Delete(c *gin.Context) {
+	jobID, err := uuid.Parse(c.Param("job_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+	if err := h.svc.DeleteJob(c.Request.Context(), middleware.GetOrgID(c), jobID); err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

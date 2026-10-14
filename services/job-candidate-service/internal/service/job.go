@@ -67,6 +67,14 @@ func (s *JobService) GetJob(ctx context.Context, orgID, jobID uuid.UUID) (*model
 	return job, nil
 }
 
+// DeleteJob removes a job role scoped to the org.
+func (s *JobService) DeleteJob(ctx context.Context, orgID, jobID uuid.UUID) error {
+	if err := s.repo.Delete(ctx, orgID, jobID); err != nil {
+		return fmt.Errorf("JobService.DeleteJob: %w", err)
+	}
+	return nil
+}
+
 // PatchJob applies a partial update to a job role.
 func (s *JobService) PatchJob(
 	ctx context.Context,

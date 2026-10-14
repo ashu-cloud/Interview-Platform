@@ -74,6 +74,36 @@ func (h *CandidateHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"candidates": candidates})
 }
 
+// ListParticipants returns the canonical participants list envelope.
+func (h *CandidateHandler) ListParticipants(c *gin.Context) {
+	jobID, err := uuid.Parse(c.Param("job_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+	participants, err := h.svc.ListCandidates(c.Request.Context(), middleware.GetOrgID(c), jobID)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"participants": participants})
+}
+
+// GetByID returns a participant scoped to the authenticated org.
+func (h *CandidateHandler) GetByID(c *gin.Context) {
+	candidateID, err := uuid.Parse(c.Param("candidate_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+	candidate, err := h.svc.GetCandidate(c.Request.Context(), middleware.GetOrgID(c), candidateID)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, candidate)
+}
+
 // GetByIDInternal handles GET /api/v1/internal/candidates/:candidate_id.
 //
 //	Response: 200 Candidate

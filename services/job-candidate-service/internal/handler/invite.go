@@ -55,6 +55,70 @@ func (h *InviteHandler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
+// CreateSession handles POST /api/v1/sessions.
+func (h *InviteHandler) CreateSession(c *gin.Context) {
+	var req model.CreateSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		RespondValidationError(c, err)
+		return
+	}
+	if err := h.validate.Struct(req); err != nil {
+		RespondValidationError(c, err)
+		return
+	}
+	resp, err := h.svc.CreateSession(c.Request.Context(), middleware.GetOrgID(c), &req)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, resp)
+}
+
+// GetSession handles GET /api/v1/sessions/:interview_id.
+func (h *InviteHandler) GetSession(c *gin.Context) {
+	sessionID, err := uuid.Parse(c.Param("interview_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+	detail, err := h.svc.GetInterviewByID(c.Request.Context(), middleware.GetOrgID(c), sessionID)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+// ListSessionTurns handles GET /api/v1/sessions/:interview_id/turns.
+func (h *InviteHandler) ListSessionTurns(c *gin.Context) {
+	sessionID, err := uuid.Parse(c.Param("interview_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+	turns, err := h.svc.ListSessionTurns(c.Request.Context(), middleware.GetOrgID(c), sessionID)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"turns": turns})
+}
+
+// EnqueueEvaluation handles POST /api/v1/sessions/:interview_id/evaluation.
+func (h *InviteHandler) EnqueueEvaluation(c *gin.Context) {
+	sessionID, err := uuid.Parse(c.Param("interview_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+	job, err := h.svc.EnqueueEvaluation(c.Request.Context(), middleware.GetOrgID(c), sessionID)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, job)
+}
+
 // ValidateToken handles GET /api/v1/invites/validate/:token (no JWT required).
 //
 //	Response: 200 { valid, candidate, job_role, docket_title, expires_at }

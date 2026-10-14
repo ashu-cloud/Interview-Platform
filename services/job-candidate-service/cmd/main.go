@@ -14,8 +14,9 @@ import (
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/cache"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/config"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/db"
+	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/embedding"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/handler"
-	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/middleware"
+	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/projector"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/repository"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/service"
 )
@@ -69,87 +70,30 @@ func main() {
 	authSvc := service.NewAuthService(userRepo, cfg.JWTSecret)
 	jobSvc := service.NewJobService(jobRepo)
 	docketSvc := service.NewDocketService(docketRepo, jobRepo)
+	switch {
+	case cfg.DemoMode:
+		slog.Info("blueprint embeddings: demo mode, using random embeddings")
+		docketSvc.SetEmbedder(embedding.DemoEmbeddingClient{}, logger)
+	case cfg.OpenAIEmbeddingAPIKey != "":
+		slog.Info("blueprint embeddings enabled", "model", cfg.EmbeddingModel, "dims", cfg.EmbeddingDims)
+		docketSvc.SetEmbedder(embedding.NewOpenAIEmbeddingClient(cfg.OpenAIEmbeddingAPIKey, cfg.EmbeddingDims).
+			WithModel(cfg.EmbeddingModel).
+			WithBaseURL(cfg.EmbeddingBaseURL), logger)
+	default:
+		slog.Warn("OPENAI_EMBEDDING_API_KEY not set: blueprint embeddings disabled, adaptive engine and RAG will be inactive for new blueprints")
+	}
 	candidateSvc := service.NewCandidateService(candidateRepo, jobRepo)
 	inviteSvc := service.NewInviteService(inviteRepo, candidateRepo, docketRepo, redisClient, cfg.AppDomain)
 
-	// ── Handlers ─────────────────────────────────────────────────────────────
-	authHandler := handler.NewAuthHandler(authSvc)
-	jobHandler := handler.NewJobHandler(jobSvc)
-	docketHandler := handler.NewDocketHandler(docketSvc)
-	candidateHandler := handler.NewCandidateHandler(candidateSvc)
-	inviteHandler := handler.NewInviteHandler(inviteSvc)
-
-	// ── Gin router ───────────────────────────────────────────────────────────
+	// ── Handlers and router ──────────────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(gin.Recovery())
-
-	// Structured request logging
-	r.Use(func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		slog.Info("request",
-			"method", c.Request.Method,
-			"path", c.Request.URL.Path,
-			"status", c.Writer.Status(),
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
-	})
-
-	// Health check
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	v1 := r.Group("/api/v1")
-
-	// ── Public routes (no authentication) ────────────────────────────────────
-	v1.POST("/auth/register", authHandler.Register)
-	v1.POST("/auth/login", authHandler.Login)
-	v1.GET("/invites/validate/:token", inviteHandler.ValidateToken)
-
-	// ── JWT-protected routes ──────────────────────────────────────────────────
-	authed := v1.Group("")
-	authed.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-	{
-		// Job roles
-		authed.POST("/jobs", jobHandler.Create)
-		authed.GET("/jobs", jobHandler.List)
-		authed.GET("/jobs/:job_id", jobHandler.GetByID)
-		authed.PATCH("/jobs/:job_id", jobHandler.Patch)
-
-		// Dockets (scoped to job)
-		authed.POST("/jobs/:job_id/dockets", docketHandler.Create)
-		authed.GET("/jobs/:job_id/dockets/:docket_id", docketHandler.GetByID)
-
-		// Candidates
-		authed.POST("/jobs/:job_id/candidates", candidateHandler.Create)
-		authed.GET("/jobs/:job_id/candidates", candidateHandler.List)
-
-		// Invites
-		authed.POST("/candidates/:candidate_id/invite", inviteHandler.Create)
-
-		// Interviews + feedback
-		authed.GET("/interviews", inviteHandler.ListInterviews)
-		authed.GET("/interviews/:interview_id", inviteHandler.GetInterview)
-		authed.GET("/interviews/:interview_id/feedback", inviteHandler.GetFeedback)
-	}
-
-	// ── Internal routes (X-Internal-Key protected) ────────────────────────────
-	// Called by Interview Orchestrator service-to-service.
-	internal := v1.Group("")
-	internal.Use(middleware.InternalAuthMiddleware(cfg.InternalAPIKey))
-	{
-		// Docket fetch — orchestrator uses at session start
-		internal.GET("/dockets/:docket_id", docketHandler.GetByIDInternal)
-
-		// Candidate fetch - feedback worker uses it to get candidate name
-		internal.GET("/candidates/:candidate_id", candidateHandler.GetByIDInternal)
-
-		// Spec gap resolutions: orchestrator needs these but spec Section 7 omits them
-		internal.PATCH("/interviews/:interview_id/status", inviteHandler.UpdateStatus)
-		internal.PATCH("/invites/:invite_id/use", inviteHandler.MarkInviteUsed)
-	}
+	r := newRouter(routeHandlers{
+		auth:      handler.NewAuthHandler(authSvc),
+		job:       handler.NewJobHandler(jobSvc),
+		docket:    handler.NewDocketHandler(docketSvc),
+		candidate: handler.NewCandidateHandler(candidateSvc),
+		invite:    handler.NewInviteHandler(inviteSvc),
+	}, cfg.JWTSecret, cfg.InternalAPIKey)
 
 	// ── HTTP server with graceful shutdown ────────────────────────────────────
 	srv := &http.Server{
@@ -168,12 +112,28 @@ func main() {
 		}
 	}()
 
+	// ── Embedded turn projector (Railway outbox mode) ───────────────────────
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+
+	if os.Getenv("KAFKA_BROKERS") == "" {
+		projRepo := projector.NewTurnRepository(pool)
+		proj := projector.NewTurnProjector(projRepo, logger, 500*time.Millisecond)
+		go func() {
+			logger.Info("turn projector started (embedded, outbox mode)")
+			proj.RunOutboxMode(serverCtx)
+			logger.Info("turn projector stopped")
+		}()
+		logger.Info("turn projector: Kafka mode handled by separate turn-projector service")
+	}
+
 	// Block until SIGINT or SIGTERM
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	slog.Info("shutting down gracefully...")
+	serverCancel()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

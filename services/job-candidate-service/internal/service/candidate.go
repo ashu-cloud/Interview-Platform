@@ -57,6 +57,15 @@ func (s *CandidateService) ListCandidates(
 	return candidates, nil
 }
 
+// GetCandidate returns a candidate scoped to the caller's org.
+func (s *CandidateService) GetCandidate(ctx context.Context, orgID, candidateID uuid.UUID) (*model.Candidate, error) {
+	candidate, err := s.repo.GetByID(ctx, orgID, candidateID)
+	if err != nil {
+		return nil, fmt.Errorf("CandidateService.GetCandidate: %w", err)
+	}
+	return candidate, nil
+}
+
 // GetByIDInternal fetches a candidate internally (without org check).
 func (s *CandidateService) GetByIDInternal(ctx context.Context, candidateID uuid.UUID) (*model.Candidate, error) {
 	c, err := s.repo.GetByIDInternal(ctx, candidateID)
