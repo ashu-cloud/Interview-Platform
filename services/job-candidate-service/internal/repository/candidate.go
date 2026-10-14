@@ -32,7 +32,7 @@ func (r *CandidateRepository) Create(
 ) (*model.Candidate, error) {
 	c := &model.Candidate{}
 	err := r.db.QueryRow(ctx,
-		`INSERT INTO candidates (org_id, job_role_id, email, full_name)
+		`INSERT INTO participants (org_id, job_role_id, email, full_name)
 		 VALUES ($1, $2, $3, $4)
 		 RETURNING id, org_id, job_role_id, email, full_name, created_at`,
 		orgID, jobRoleID, req.Email, req.FullName,
@@ -56,10 +56,10 @@ func (r *CandidateRepository) ListByJob(
 	rows, err := r.db.Query(ctx,
 		`SELECT c.id, c.org_id, c.job_role_id, c.email, c.full_name, c.created_at,
 		        COALESCE(i.status, '') AS interview_status
-		 FROM candidates c
+		 FROM participants c
 		 LEFT JOIN LATERAL (
 		     SELECT status
-		     FROM interviews
+		     FROM assessment_sessions
 		     WHERE candidate_id = c.id
 		     ORDER BY created_at DESC
 		     LIMIT 1
@@ -103,7 +103,7 @@ func (r *CandidateRepository) GetByID(
 	c := &model.Candidate{}
 	err := r.db.QueryRow(ctx,
 		`SELECT id, org_id, job_role_id, email, full_name, created_at
-		 FROM candidates WHERE id = $1 AND org_id = $2`,
+		 FROM participants WHERE id = $1 AND org_id = $2`,
 		candidateID, orgID,
 	).Scan(&c.ID, &c.OrgID, &c.JobRoleID, &c.Email, &c.FullName, &c.CreatedAt)
 	if err != nil {
@@ -120,7 +120,7 @@ func (r *CandidateRepository) GetByIDInternal(ctx context.Context, id uuid.UUID)
 	c := &model.Candidate{}
 	err := r.db.QueryRow(ctx,
 		`SELECT id, org_id, job_role_id, email, full_name, created_at
-		 FROM candidates WHERE id = $1`,
+		 FROM participants WHERE id = $1`,
 		id,
 	).Scan(&c.ID, &c.OrgID, &c.JobRoleID, &c.Email, &c.FullName, &c.CreatedAt)
 	if err != nil {

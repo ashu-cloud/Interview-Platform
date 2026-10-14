@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/apperror"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/model"
@@ -35,7 +36,7 @@ func (r *JobRepository) Create(
 	}
 	job := &model.JobRole{}
 	err := r.db.QueryRow(ctx,
-		`INSERT INTO job_roles (org_id, created_by, title, description, required_skills)
+		`INSERT INTO assessment_tracks (org_id, created_by, title, description, required_skills)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, org_id, created_by, title, description,
 		           COALESCE(required_skills, ARRAY[]::text[]),
@@ -66,7 +67,7 @@ func (r *JobRepository) List(
 		        COALESCE(required_skills, ARRAY[]::text[]),
 		        status, created_at, updated_at,
 		        COUNT(*) OVER() AS total
-		 FROM job_roles
+		 FROM assessment_tracks
 		 WHERE org_id = $1
 		   AND ($2 = '' OR status = $2)
 		 ORDER BY created_at DESC
@@ -111,7 +112,7 @@ func (r *JobRepository) GetByID(
 		`SELECT id, org_id, created_by, title, description,
 		        COALESCE(required_skills, ARRAY[]::text[]),
 		        status, created_at, updated_at
-		 FROM job_roles
+		 FROM assessment_tracks
 		 WHERE id = $1 AND org_id = $2`,
 		jobID, orgID,
 	).Scan(
@@ -125,6 +126,39 @@ func (r *JobRepository) GetByID(
 		return nil, fmt.Errorf("JobRepository.GetByID: %w", err)
 	}
 	return job, nil
+}
+
+// Delete removes a job role scoped to an org.
+func (r *JobRepository) Delete(ctx context.Context, orgID, jobID uuid.UUID) error {
+	tag, err := r.db.Exec(ctx,
+		`DELETE FROM assessment_tracks t
+		 WHERE t.org_id = $1 AND t.id = $2
+		   AND NOT EXISTS (SELECT 1 FROM assessment_blueprints d WHERE d.job_role_id = t.id)
+		   AND NOT EXISTS (SELECT 1 FROM participants c WHERE c.job_role_id = t.id)`,
+		orgID, jobID,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return fmt.Errorf("JobRepository.Delete: track has dependent records: %w", apperror.ErrConflict)
+		}
+		return fmt.Errorf("JobRepository.Delete: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+
+	var exists bool
+	if err := r.db.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM assessment_tracks WHERE org_id = $1 AND id = $2)`,
+		orgID, jobID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("JobRepository.Delete: verify track: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("JobRepository.Delete: track has dependent records: %w", apperror.ErrConflict)
+	}
+	return fmt.Errorf("JobRepository.Delete: %w", apperror.ErrNotFound)
 }
 
 // Patch applies a partial update to a job role.
@@ -169,7 +203,7 @@ func (r *JobRepository) Patch(
 	args = append(args, orgID, jobID)
 
 	query := fmt.Sprintf(
-		`UPDATE job_roles SET %s
+		`UPDATE assessment_tracks SET %s
 		 WHERE org_id = $%d AND id = $%d
 		 RETURNING id, org_id, created_by, title, description,
 		           COALESCE(required_skills, ARRAY[]::text[]),

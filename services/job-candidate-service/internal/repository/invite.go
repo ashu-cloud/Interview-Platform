@@ -58,7 +58,7 @@ func (r *InviteRepository) CreateInviteAndInterview(
 
 	invite := &model.InterviewInvite{}
 	err = tx.QueryRow(ctx,
-		`INSERT INTO interview_invites (candidate_id, docket_id, org_id, token, expires_at)
+		`INSERT INTO assessment_invites (candidate_id, docket_id, org_id, token, expires_at)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, candidate_id, docket_id, org_id, token, expires_at, used_at, created_at`,
 		candidateID, docketID, orgID, token, expiresAt,
@@ -70,18 +70,7 @@ func (r *InviteRepository) CreateInviteAndInterview(
 		return nil, nil, fmt.Errorf("InviteRepository.CreateInviteAndInterview: insert invite: %w", err)
 	}
 
-	interview := &model.Interview{}
-	err = tx.QueryRow(ctx,
-		`INSERT INTO interviews (invite_id, candidate_id, docket_id, org_id, status)
-		 VALUES ($1, $2, $3, $4, 'invited')
-		 RETURNING id, invite_id, candidate_id, docket_id, org_id, status,
-		           started_at, completed_at, created_at, updated_at`,
-		invite.ID, candidateID, docketID, orgID,
-	).Scan(
-		&interview.ID, &interview.InviteID, &interview.CandidateID, &interview.DocketID,
-		&interview.OrgID, &interview.Status, &interview.StartedAt, &interview.CompletedAt,
-		&interview.CreatedAt, &interview.UpdatedAt,
-	)
+	interview, err := createSession(ctx, tx, invite.ID, candidateID, docketID, orgID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("InviteRepository.CreateInviteAndInterview: insert interview: %w", err)
 	}
@@ -90,6 +79,102 @@ func (r *InviteRepository) CreateInviteAndInterview(
 		return nil, nil, fmt.Errorf("InviteRepository.CreateInviteAndInterview: commit: %w", err)
 	}
 	return invite, interview, nil
+}
+
+// CreateSession validates an org-owned invite and idempotently creates or reuses its session.
+func (r *InviteRepository) CreateSession(
+	ctx context.Context,
+	orgID, inviteID uuid.UUID,
+) (*model.Interview, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("InviteRepository.CreateSession: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	invite := &model.InterviewInvite{}
+	err = tx.QueryRow(ctx,
+		`SELECT id, candidate_id, docket_id, org_id, token, expires_at, used_at, created_at
+		 FROM assessment_invites
+		 WHERE id = $1 AND org_id = $2
+		 FOR UPDATE`,
+		inviteID, orgID,
+	).Scan(
+		&invite.ID, &invite.CandidateID, &invite.DocketID, &invite.OrgID,
+		&invite.Token, &invite.ExpiresAt, &invite.UsedAt, &invite.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("InviteRepository.CreateSession: %w", apperror.ErrNotFound)
+		}
+		return nil, fmt.Errorf("InviteRepository.CreateSession: get invite: %w", err)
+	}
+
+	interview := &model.Interview{}
+	err = tx.QueryRow(ctx,
+		`SELECT id, invite_id, candidate_id, docket_id, org_id, status,
+		        started_at, completed_at, created_at, updated_at
+		 FROM assessment_sessions
+		 WHERE invite_id = $1 AND org_id = $2
+		 ORDER BY created_at
+		 LIMIT 1`,
+		inviteID, orgID,
+	).Scan(
+		&interview.ID, &interview.InviteID, &interview.CandidateID, &interview.DocketID,
+		&interview.OrgID, &interview.Status, &interview.StartedAt, &interview.CompletedAt,
+		&interview.CreatedAt, &interview.UpdatedAt,
+	)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("InviteRepository.CreateSession: commit reuse: %w", err)
+		}
+		return interview, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("InviteRepository.CreateSession: find session: %w", err)
+	}
+	if invite.UsedAt != nil {
+		return nil, fmt.Errorf("InviteRepository.CreateSession: invite already used: %w", apperror.ErrConflict)
+	}
+	if !invite.ExpiresAt.After(time.Now().UTC()) {
+		return nil, fmt.Errorf("InviteRepository.CreateSession: invite expired: %w", apperror.ErrNotFound)
+	}
+
+	interview, err = createSession(ctx, tx, invite.ID, invite.CandidateID, invite.DocketID, invite.OrgID)
+	if err != nil {
+		return nil, fmt.Errorf("InviteRepository.CreateSession: insert session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("InviteRepository.CreateSession: commit: %w", err)
+	}
+	return interview, nil
+}
+
+type sessionRowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func createSession(
+	ctx context.Context,
+	q sessionRowQuerier,
+	inviteID, candidateID, docketID, orgID uuid.UUID,
+) (*model.Interview, error) {
+	interview := &model.Interview{}
+	err := q.QueryRow(ctx,
+		`INSERT INTO assessment_sessions (invite_id, candidate_id, docket_id, org_id, status)
+		 VALUES ($1, $2, $3, $4, 'invited')
+		 RETURNING id, invite_id, candidate_id, docket_id, org_id, status,
+		           started_at, completed_at, created_at, updated_at`,
+		inviteID, candidateID, docketID, orgID,
+	).Scan(
+		&interview.ID, &interview.InviteID, &interview.CandidateID, &interview.DocketID,
+		&interview.OrgID, &interview.Status, &interview.StartedAt, &interview.CompletedAt,
+		&interview.CreatedAt, &interview.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return interview, nil
 }
 
 // GetByToken fetches invite details (with candidate/job/docket info) for token validation.
@@ -102,11 +187,11 @@ func (r *InviteRepository) GetByToken(ctx context.Context, token string) (*invit
 		        c.full_name, c.email,
 		        jr.title,
 		        d.title
-		 FROM interview_invites ii
-		 JOIN interviews i ON i.invite_id = ii.id
-		 JOIN candidates c ON c.id = ii.candidate_id
-		 JOIN dockets d ON d.id = ii.docket_id
-		 JOIN job_roles jr ON jr.id = d.job_role_id
+		 FROM assessment_invites ii
+		 JOIN assessment_sessions i ON i.invite_id = ii.id
+		 JOIN participants c ON c.id = ii.candidate_id
+		 JOIN assessment_blueprints d ON d.id = ii.docket_id
+		 JOIN assessment_tracks jr ON jr.id = d.job_role_id
 		 WHERE ii.token = $1`,
 		token,
 	).Scan(
@@ -131,7 +216,7 @@ func (r *InviteRepository) GetByInviteID(ctx context.Context, inviteID uuid.UUID
 	invite := &model.InterviewInvite{}
 	err := r.db.QueryRow(ctx,
 		`SELECT id, candidate_id, docket_id, org_id, token, expires_at, used_at, created_at
-		 FROM interview_invites WHERE id = $1`,
+		 FROM assessment_invites WHERE id = $1`,
 		inviteID,
 	).Scan(
 		&invite.ID, &invite.CandidateID, &invite.DocketID, &invite.OrgID,
@@ -151,8 +236,8 @@ func (r *InviteRepository) GetInviteByInterviewID(ctx context.Context, interview
 	invite := &model.InterviewInvite{}
 	err := r.db.QueryRow(ctx,
 		`SELECT ii.id, ii.candidate_id, ii.docket_id, ii.org_id, ii.token, ii.expires_at, ii.used_at, ii.created_at
-		 FROM interview_invites ii
-		 JOIN interviews i ON i.invite_id = ii.id
+		 FROM assessment_invites ii
+		 JOIN assessment_sessions i ON i.invite_id = ii.id
 		 WHERE i.id = $1`,
 		interviewID,
 	).Scan(
@@ -171,7 +256,7 @@ func (r *InviteRepository) GetInviteByInterviewID(ctx context.Context, interview
 // MarkUsed sets used_at on an invite. Cache invalidation is handled by the service layer.
 func (r *InviteRepository) MarkUsed(ctx context.Context, inviteID uuid.UUID, at time.Time) error {
 	tag, err := r.db.Exec(ctx,
-		`UPDATE interview_invites SET used_at = $1 WHERE id = $2`,
+		`UPDATE assessment_invites SET used_at = $1 WHERE id = $2`,
 		at, inviteID,
 	)
 	if err != nil {
@@ -187,18 +272,18 @@ func (r *InviteRepository) MarkUsed(ctx context.Context, inviteID uuid.UUID, at 
 // NOTE: This is a spec gap resolution — required by the orchestrator but not defined in spec Section 7.
 func (r *InviteRepository) UpdateInterviewStatus(ctx context.Context, interviewID uuid.UUID, status string) (bool, error) {
 	tag, err := r.db.Exec(ctx,
-		`UPDATE interviews
+		`UPDATE assessment_sessions
 		 SET status       = $1::varchar,
 		     updated_at   = NOW(),
 		     started_at   = CASE WHEN $1::varchar = 'in_progress' AND started_at IS NULL THEN NOW() ELSE started_at END,
-		     completed_at = CASE WHEN $1::varchar IN ('completed', 'feedback_ready') AND completed_at IS NULL THEN NOW() ELSE completed_at END
+		     completed_at = CASE WHEN $1::varchar IN ('completed', 'feedback_ready', 'evaluation_ready') AND completed_at IS NULL THEN NOW() ELSE completed_at END
 		 WHERE id = $2 AND status != $1::varchar`,
 		status, interviewID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("InviteRepository.UpdateInterviewStatus: %w", err)
 	}
-	
+
 	// If RowsAffected is 0, the status was already set (or interview doesn't exist).
 	// We return false to indicate no transition occurred.
 	return tag.RowsAffected() > 0, nil
@@ -228,9 +313,9 @@ func (r *InviteRepository) GetInterviews(
 		        c.id, c.full_name, c.email,
 		        d.id, d.title,
 		        COUNT(*) OVER() AS total
-		 FROM interviews i
-		 JOIN candidates c ON c.id = i.candidate_id
-		 JOIN dockets d ON d.id = i.docket_id
+		 FROM assessment_sessions i
+		 JOIN participants c ON c.id = i.candidate_id
+		 JOIN assessment_blueprints d ON d.id = i.docket_id
 		 WHERE i.org_id = $1
 		   AND ($2 = '' OR i.status = $2)
 		   AND ($3::uuid IS NULL OR d.job_role_id = $3::uuid)
@@ -277,9 +362,9 @@ func (r *InviteRepository) GetInterviewByID(
 		`SELECT i.id, i.status, i.started_at, i.completed_at,
 		        c.id, c.full_name, c.email,
 		        d.id, d.title
-		 FROM interviews i
-		 JOIN candidates c ON c.id = i.candidate_id
-		 JOIN dockets d ON d.id = i.docket_id
+		 FROM assessment_sessions i
+		 JOIN participants c ON c.id = i.candidate_id
+		 JOIN assessment_blueprints d ON d.id = i.docket_id
 		 WHERE i.id = $1 AND i.org_id = $2`,
 		interviewID, orgID,
 	).Scan(
@@ -309,8 +394,8 @@ func (r *InviteRepository) GetFeedback(
 
 	err := r.db.QueryRow(ctx,
 		`SELECT fr.id, fr.summary, fr.overall_score, fr.recommendation, fr.transcript_json
-		 FROM feedback_reports fr
-		 JOIN interviews i ON i.id = fr.interview_id
+		 FROM evaluation_reports fr
+		 JOIN assessment_sessions i ON i.id = fr.interview_id
 		 WHERE fr.interview_id = $1 AND i.org_id = $2`,
 		interviewID, orgID,
 	).Scan(&resp.ID, &resp.Summary, &resp.OverallScore, &resp.Recommendation, &transcriptRaw)
@@ -333,10 +418,10 @@ func (r *InviteRepository) GetFeedback(
 
 	// Fetch per-criterion scores with rubric names
 	sRows, err := r.db.Query(ctx,
-		`SELECT fs.score, fs.evidence, rc.name, rc.max_score
-		 FROM feedback_scores fs
-		 JOIN feedback_reports fr ON fr.id = fs.feedback_id
-		 JOIN rubric_criteria rc ON rc.id = fs.criterion_id
+		`SELECT fs.score, fs.evidence, rc.name, rc.max_score, fs.evidence_turn_id::text, COALESCE(fs.is_grounded, true)
+		 FROM evaluation_scores fs
+		 JOIN evaluation_reports fr ON fr.id = fs.feedback_id
+		 JOIN evaluation_criteria rc ON rc.id = fs.criterion_id
 		 WHERE fr.interview_id = $1
 		 ORDER BY rc.order_index`,
 		interviewID,
@@ -349,8 +434,12 @@ func (r *InviteRepository) GetFeedback(
 	resp.Scores = []model.FeedbackScoreDetail{}
 	for sRows.Next() {
 		var s model.FeedbackScoreDetail
-		if err := sRows.Scan(&s.Score, &s.Evidence, &s.CriterionName, &s.MaxScore); err != nil {
+		var turnID *string
+		if err := sRows.Scan(&s.Score, &s.Evidence, &s.CriterionName, &s.MaxScore, &turnID, &s.IsGrounded); err != nil {
 			return nil, fmt.Errorf("InviteRepository.GetFeedback: scan score: %w", err)
+		}
+		if turnID != nil && *turnID != "" {
+			s.EvidenceTurnID = turnID
 		}
 		resp.Scores = append(resp.Scores, s)
 	}
@@ -359,4 +448,129 @@ func (r *InviteRepository) GetFeedback(
 	}
 
 	return resp, nil
+}
+
+// ListSessionTurns returns materialized turns for a session owned by an org.
+func (r *InviteRepository) ListSessionTurns(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+) ([]model.SessionTurn, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT st.id, st.session_id, st.org_id, st.turn_number, st.role, st.content, st.created_at
+		 FROM session_turns st
+		 JOIN assessment_sessions s ON s.id = st.session_id
+		 WHERE st.session_id = $1 AND s.org_id = $2
+		 ORDER BY st.turn_number, st.created_at, st.id`,
+		sessionID, orgID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("InviteRepository.ListSessionTurns: query: %w", err)
+	}
+	defer rows.Close()
+
+	turns := []model.SessionTurn{}
+	for rows.Next() {
+		var turn model.SessionTurn
+		if err := rows.Scan(
+			&turn.ID, &turn.SessionID, &turn.OrgID, &turn.TurnNumber,
+			&turn.Role, &turn.Content, &turn.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("InviteRepository.ListSessionTurns: scan: %w", err)
+		}
+		turns = append(turns, turn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("InviteRepository.ListSessionTurns: rows: %w", err)
+	}
+	if len(turns) == 0 {
+		var exists bool
+		if err := r.db.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM assessment_sessions WHERE id = $1 AND org_id = $2)`,
+			sessionID, orgID,
+		).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("InviteRepository.ListSessionTurns: verify session: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("InviteRepository.ListSessionTurns: %w", apperror.ErrNotFound)
+		}
+	}
+	return turns, nil
+}
+
+// EnqueueEvaluation idempotently creates an outbox_completed event for a completed session.
+func (r *InviteRepository) EnqueueEvaluation(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+) (*model.EvaluationJob, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var participantID, blueprintID uuid.UUID
+	var status string
+	err = tx.QueryRow(ctx,
+		`SELECT candidate_id, docket_id, status
+		 FROM assessment_sessions
+		 WHERE id = $1 AND org_id = $2
+		 FOR UPDATE`,
+		sessionID, orgID,
+	).Scan(&participantID, &blueprintID, &status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: %w", apperror.ErrNotFound)
+		}
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: lock session: %w", err)
+	}
+	if status != "completed" && status != "feedback_ready" && status != "evaluation_ready" {
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: session is not completed: %w", apperror.ErrConflict)
+	}
+
+	job := &model.EvaluationJob{}
+	err = tx.QueryRow(ctx,
+		`SELECT id, session_id, org_id, participant_id, blueprint_id, turn_count, status, created_at
+		 FROM outbox_completed
+		 WHERE session_id = $1 AND org_id = $2
+		 ORDER BY created_at, id
+		 LIMIT 1`,
+		sessionID, orgID,
+	).Scan(
+		&job.ID, &job.SessionID, &job.OrgID, &job.ParticipantID, &job.BlueprintID,
+		&job.TurnCount, &job.Status, &job.CreatedAt,
+	)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: commit existing: %w", err)
+		}
+		return job, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: find existing job: %w", err)
+	}
+
+	var turnCount int
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(MAX(turn_number), 0) FROM session_turns WHERE session_id = $1`,
+		sessionID,
+	).Scan(&turnCount); err != nil {
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: get turn count: %w", err)
+	}
+
+	err = tx.QueryRow(ctx,
+		`INSERT INTO outbox_completed (session_id, org_id, participant_id, blueprint_id, turn_count)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, session_id, org_id, participant_id, blueprint_id, turn_count, status, created_at`,
+		sessionID, orgID, participantID, blueprintID, turnCount,
+	).Scan(
+		&job.ID, &job.SessionID, &job.OrgID, &job.ParticipantID, &job.BlueprintID,
+		&job.TurnCount, &job.Status, &job.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: insert job: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: commit: %w", err)
+	}
+	return job, nil
 }
