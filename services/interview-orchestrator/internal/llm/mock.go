@@ -41,7 +41,7 @@ func (DemoProvider) GenerateResponse(_ context.Context, systemPrompt string, mes
 	// Count how many user responses have occurred to determine which question to ask
 	candidateAnswers := 0
 	for _, m := range messages {
-		if m.Role == "user" && !strings.Contains(m.Content, "You are conducting an interview") {
+		if (m.Role == "user" || m.Role == "participant") && !strings.Contains(m.Content, "You are conducting an interview") {
 			candidateAnswers++
 		}
 	}

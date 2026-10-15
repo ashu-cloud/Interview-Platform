@@ -8,4 +8,5 @@ type DemoAdapter struct{}
 
 func NewDemoAdapter() Adapter { return DemoAdapter{} }
 
+func (DemoAdapter) SynthesizeSentence(_ context.Context, _ string) ([]byte, error) { return nil, nil }
 func (DemoAdapter) SynthesizeStream(_ context.Context, _ string, _ chan<- []byte) error { return nil }

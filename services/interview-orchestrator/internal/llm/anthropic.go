@@ -22,7 +22,7 @@ func NewAnthropicProvider(apiKey string) Provider {
 func (p *anthropicProvider) GenerateResponse(ctx context.Context, systemPrompt string, messages []model.Message, streamChan chan<- string) error {
 	anthropicMessages := []anthropic.MessageParam{}
 	for _, m := range messages {
-		if m.Role == "user" {
+		if m.Role == "user" || m.Role == "participant" {
 			anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
 		} else {
 			anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))

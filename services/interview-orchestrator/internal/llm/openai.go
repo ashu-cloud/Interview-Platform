@@ -40,7 +40,7 @@ func (p *openAIProvider) GenerateResponse(ctx context.Context, systemPrompt stri
 	}
 
 	for _, m := range messages {
-		if m.Role == "user" {
+		if m.Role == "user" || m.Role == "participant" {
 			oaiMessages = append(oaiMessages, openai.UserMessage(m.Content))
 		} else {
 			oaiMessages = append(oaiMessages, openai.AssistantMessage(m.Content))
