@@ -15,6 +15,9 @@ import (
 type JCSClient interface {
 	ValidateInvite(ctx context.Context, token string) (*InviteValidateResponse, error)
 	GetDocket(ctx context.Context, docketID string) (*model.Docket, error)
+	// GetCriteriaEmbeddings returns criterion ID -> unit vector. An empty map
+	// means the blueprint has no embeddings yet.
+	GetCriteriaEmbeddings(ctx context.Context, blueprintID string) (map[string][]float32, error)
 	UpdateInterviewStatus(ctx context.Context, interviewID string, status string) (bool, error)
 	MarkInviteUsed(ctx context.Context, inviteID string) error
 }
@@ -107,6 +110,37 @@ func (c *jcsClient) GetDocket(ctx context.Context, docketID string) (*model.Dock
 	}
 
 	return &res, nil
+}
+
+func (c *jcsClient) GetCriteriaEmbeddings(ctx context.Context, blueprintID string) (map[string][]float32, error) {
+	url := fmt.Sprintf("%s/internal/blueprints/%s/criteria-embeddings", c.baseURL, blueprintID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+	req.Header.Set("X-Internal-Key", c.internalAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(b))
+	}
+
+	var res struct {
+		Embeddings map[string][]float32 `json:"embeddings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decode response failed: %w", err)
+	}
+	if res.Embeddings == nil {
+		res.Embeddings = map[string][]float32{}
+	}
+	return res.Embeddings, nil
 }
 
 func (c *jcsClient) UpdateInterviewStatus(ctx context.Context, interviewID string, status string) (bool, error) {

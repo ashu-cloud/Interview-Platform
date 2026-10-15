@@ -22,7 +22,10 @@ type WSMessage struct {
 func main() {
 	ctx := context.Background()
 	// 1. Setup DB fixtures
-	dbURL := "postgres://postgres:postgres@localhost:5432/interview_platform?sslmode=disable"
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://postgres:postgres@localhost:5432/interview_platform?sslmode=disable"
+	}
 	conn, err := pgx.Connect(ctx, dbURL)
 	if err != nil {
 		log.Fatalf("db connect failed: %v", err)
@@ -43,15 +46,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("insert user: %v", err)
 	}
-	_, err = conn.Exec(ctx, `INSERT INTO job_roles (id, org_id, created_by, title, description) VALUES ($1, $2, $3, 'Test Job', 'Desc')`, jobRoleID, orgID, userID)
+	_, err = conn.Exec(ctx, `INSERT INTO assessment_tracks (id, org_id, created_by, title, description) VALUES ($1, $2, $3, 'Test Job', 'Desc')`, jobRoleID, orgID, userID)
 	if err != nil {
 		log.Fatalf("insert job: %v", err)
 	}
-	_, err = conn.Exec(ctx, `INSERT INTO candidates (id, org_id, job_role_id, full_name, email) VALUES ($1, $2, $3, 'Test Candidate', 'cand@example.com')`, candidateID, orgID, jobRoleID)
+	_, err = conn.Exec(ctx, `INSERT INTO participants (id, org_id, job_role_id, full_name, email) VALUES ($1, $2, $3, 'Test Candidate', 'cand@example.com')`, candidateID, orgID, jobRoleID)
 	if err != nil {
 		log.Fatalf("insert candidate: %v", err)
 	}
-	_, err = conn.Exec(ctx, `INSERT INTO dockets (id, org_id, job_role_id, title, instructions) VALUES ($1, $2, $3, 'Test Docket', 'Instructions')`, docketID, orgID, jobRoleID)
+	_, err = conn.Exec(ctx, `INSERT INTO assessment_blueprints (id, org_id, job_role_id, title, instructions) VALUES ($1, $2, $3, 'Test Docket', 'Instructions')`, docketID, orgID, jobRoleID)
 	if err != nil {
 		log.Fatalf("insert docket: %v", err)
 	}
@@ -67,14 +70,14 @@ func main() {
 	interviewID := uuid.New()
 
 	_, err = conn.Exec(ctx, `
-		INSERT INTO interview_invites (id, candidate_id, docket_id, org_id, token, expires_at)
+		INSERT INTO assessment_invites (id, candidate_id, docket_id, org_id, token, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		inviteID, candidateID, docketID, orgID, inviteToken, expiresAt)
 	if err != nil {
 		log.Fatalf("insert invite: %v", err)
 	}
 	_, err = conn.Exec(ctx, `
-		INSERT INTO interviews (id, invite_id, candidate_id, docket_id, org_id, status)
+		INSERT INTO assessment_sessions (id, invite_id, candidate_id, docket_id, org_id, status)
 		VALUES ($1, $2, $3, $4, $5, 'invited')`,
 		interviewID, inviteID, candidateID, docketID, orgID)
 	if err != nil {

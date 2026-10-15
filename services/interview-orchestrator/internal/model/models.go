@@ -45,4 +45,9 @@ type Session struct {
 	Status              string    `json:"status"` // in_progress | completed
 	StartedAt           time.Time `json:"started_at"`
 	LastActive          time.Time `json:"last_active"`
+
+	// Adaptive engine state. Both are empty when criteria embeddings are
+	// unavailable, which disables the adaptive engine for the session.
+	CoverageMatrix     map[string]float64   `json:"coverage_matrix,omitempty"`
+	CriteriaEmbeddings map[string][]float32 `json:"criteria_embeddings,omitempty"`
 }

@@ -10,14 +10,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
+	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/adaptive"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/config"
+	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/embedding"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/handler"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/integration"
-	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/kafka"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/llm"
+	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/publisher"
+	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/rag"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/session"
+	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/storage"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/stt"
 	"github.com/yourusername/ai-interview/services/interview-orchestrator/internal/tts"
 )
@@ -73,16 +78,78 @@ func main() {
 		llmPool = llm.NewPool(primaryLLM, secondaryLLM)
 	}
 
-	kafkaBrokers := strings.Split(cfg.KafkaBrokers, ",")
-	kafkaProd := kafka.NewProducer(kafkaBrokers)
-	defer func() { _ = kafkaProd.Close() }()
+	var kafkaBrokers []string
+	if cfg.KafkaBrokers != "" {
+		kafkaBrokers = strings.Split(cfg.KafkaBrokers, ",")
+	}
+	publisherCtx, cancelPublisherInit := context.WithTimeout(context.Background(), 10*time.Second)
+	eventPublisher, err := publisher.New(publisherCtx, publisher.Config{
+		KafkaBrokers:   kafkaBrokers,
+		DatabaseURL:    cfg.DatabaseURL,
+		TurnsTopic:     cfg.KafkaTurnsTopic,
+		CompletedTopic: cfg.KafkaCompletedTopic,
+	})
+	cancelPublisherInit()
+	if err != nil {
+		slog.Error("failed to initialize event publisher", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = eventPublisher.Close() }()
+	if len(kafkaBrokers) > 0 {
+		slog.Info("using Kafka event publisher", "turns_topic", cfg.KafkaTurnsTopic, "completed_topic", cfg.KafkaCompletedTopic)
+	} else {
+		slog.Info("using Postgres outbox event publisher")
+	}
 
-	wsHandler := handler.NewWebSocketHandler(jcsClient, sessMgr, sttAdapter, llmPool, ttsAdapter, kafkaProd)
+	var dbPool *pgxpool.Pool
+	if cfg.DatabaseURL != "" {
+		poolCtx, poolCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		p, poolErr := pgxpool.New(poolCtx, cfg.DatabaseURL)
+		poolCancel()
+		if poolErr == nil {
+			dbPool = p
+			defer dbPool.Close()
+		} else {
+			slog.Warn("could not connect database pool for audio recordings", "error", poolErr)
+		}
+	}
+
+	audioOffloader := storage.NewAudioOffloader(
+		cfg.MinIOEndpoint,
+		cfg.MinIOAccessKey,
+		cfg.MinIOSecretKey,
+		cfg.MinIOBucketAudio,
+		cfg.MinIOUseSSL,
+		dbPool,
+		logger,
+	)
+	audioOffloader.Start()
+	defer audioOffloader.Stop()
+
+	var embClient embedding.EmbeddingClient
+	if cfg.DemoMode || cfg.OpenAIEmbeddingAPIKey == "" {
+		embClient = embedding.DemoEmbeddingClient{}
+	} else {
+		embClient = embedding.NewOpenAIEmbeddingClient(cfg.OpenAIEmbeddingAPIKey, cfg.EmbeddingDims).
+			WithModel(cfg.EmbeddingModel).
+			WithBaseURL(cfg.EmbeddingBaseURL)
+	}
+	adaptiveEngine := adaptive.NewEngine(embClient)
+	ragPrefetcher := rag.NewPrefetcher(dbPool, redisClient, embClient, 150*time.Millisecond)
+	if dbPool == nil {
+		slog.Warn("database pool unavailable, RAG prefetch disabled")
+	}
+
+	wsHandler := handler.NewWebSocketHandler(jcsClient, sessMgr, sttAdapter, llmPool, ttsAdapter, eventPublisher)
+	wsHandler.SetAudioOffloader(audioOffloader)
+	wsHandler.SetAdaptive(adaptiveEngine, ragPrefetcher)
+	wsHandler.SetDBPool(dbPool)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "ok"}`))
+		w.Write([]byte(`{"status":"ok","service":"session-runtime"}`))
 	})
 	mux.HandleFunc("/ws/interview/", wsHandler.HandleWS)
 
