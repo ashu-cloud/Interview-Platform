@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +33,13 @@ func (m *CountingMockLLM) GenerateFeedback(ctx context.Context, prompt string) (
 }
 
 func TestFeedbackWorker_Integration(t *testing.T) {
+	if os.Getenv("INTEGRATION_TEST") != "1" {
+		t.Skip("set INTEGRATION_TEST=1 to run database/Kafka integration tests")
+	}
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://postgres:postgres@localhost:5432/interview_platform?sslmode=disable"
+		t.Fatal("DATABASE_URL is required when INTEGRATION_TEST=1")
 	}
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 	if kafkaBrokers == "" {
@@ -45,7 +52,7 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 	if os.Getenv("EXTERNAL_FEEDBACK_WORKER") != "true" {
 		conn, err := kafka.Dial("tcp", kafkaBrokers)
 		if err == nil {
-			conn.DeleteTopics("interview.completed", "interview.turns")
+			conn.DeleteTopics("session.completed", "session.turns")
 			conn.Close()
 			time.Sleep(2 * time.Second) // allow broker to clean up
 		}
@@ -76,34 +83,34 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 		t.Fatalf("insert user: %v", err)
 	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO job_roles (id, org_id, title, description, created_by) VALUES ($1, $2, 'Backend Eng', 'Desc', $3)`, jobRoleID, orgID, userID)
+	_, err = pool.Exec(ctx, `INSERT INTO assessment_tracks (id, org_id, title, description, created_by) VALUES ($1, $2, 'Backend Eng', 'Desc', $3)`, jobRoleID, orgID, userID)
 	if err != nil {
 		t.Fatalf("insert job_role: %v", err)
 	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO dockets (id, job_role_id, org_id, title, instructions) VALUES ($1, $2, $3, 'Test Docket', 'Instructions')`, docketID, jobRoleID, orgID)
+	_, err = pool.Exec(ctx, `INSERT INTO assessment_blueprints (id, job_role_id, org_id, title, instructions) VALUES ($1, $2, $3, 'Test Docket', 'Instructions')`, docketID, jobRoleID, orgID)
 	if err != nil {
 		t.Fatalf("insert docket: %v", err)
 	}
 
 	critID := uuid.New().String()
-	_, err = pool.Exec(ctx, `INSERT INTO rubric_criteria (id, docket_id, name, description, max_score, order_index) VALUES ($1, $2, 'Code Quality', 'desc', 10, 1)`, critID, docketID)
+	_, err = pool.Exec(ctx, `INSERT INTO evaluation_criteria (id, docket_id, name, description, max_score, order_index) VALUES ($1, $2, 'Code Quality', 'desc', 10, 1)`, critID, docketID)
 	if err != nil {
 		t.Fatalf("insert rubric: %v", err)
 	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO candidates (id, org_id, job_role_id, full_name, email) VALUES ($1, $2, $3, 'Test Candidate', $4)`, candidateID, orgID, jobRoleID, candidateID+"@test.com")
+	_, err = pool.Exec(ctx, `INSERT INTO participants (id, org_id, job_role_id, full_name, email) VALUES ($1, $2, $3, 'Test Candidate', $4)`, candidateID, orgID, jobRoleID, candidateID+"@test.com")
 	if err != nil {
 		t.Fatalf("insert candidate: %v", err)
 	}
 
 	inviteID := uuid.New().String()
-	_, err = pool.Exec(ctx, `INSERT INTO interview_invites (id, candidate_id, docket_id, org_id, token, expires_at) VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 day')`, inviteID, candidateID, docketID, orgID, uuid.New().String())
+	_, err = pool.Exec(ctx, `INSERT INTO assessment_invites (id, candidate_id, docket_id, org_id, token, expires_at) VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 day')`, inviteID, candidateID, docketID, orgID, uuid.New().String())
 	if err != nil {
 		t.Fatalf("insert invite: %v", err)
 	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO interviews (id, invite_id, candidate_id, docket_id, org_id, status) VALUES ($1, $2, $3, $4, $5, 'completed')`, interviewID, inviteID, candidateID, docketID, orgID)
+	_, err = pool.Exec(ctx, `INSERT INTO assessment_sessions (id, invite_id, candidate_id, docket_id, org_id, status) VALUES ($1, $2, $3, $4, $5, 'completed')`, interviewID, inviteID, candidateID, docketID, orgID)
 	if err != nil {
 		t.Fatalf("insert interview: %v", err)
 	}
@@ -131,7 +138,7 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 
 	turnWriter := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
-		Topic:                  "interview.turns",
+		Topic:                  "session.turns",
 		Balancer:               &kafka.Hash{},
 		Transport:              transport,
 		AllowAutoTopicCreation: true,
@@ -139,13 +146,12 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 	}
 	defer turnWriter.Close()
 
-	// Write 2 conversational turns. Each turn has a user event and an
-	// assistant event, matching the orchestrator's Kafka contract.
+	// Write canonical participant and assessor events for 2 conversational turns.
 	turns := []model.TurnEvent{
-		{EventType: "turn", InterviewID: interviewID, OrgID: orgID, TurnNumber: 1, Role: "user", Content: "Hi", Timestamp: time.Now()},
-		{EventType: "turn", InterviewID: interviewID, OrgID: orgID, TurnNumber: 1, Role: "assistant", Content: "Hello", Timestamp: time.Now()},
-		{EventType: "turn", InterviewID: interviewID, OrgID: orgID, TurnNumber: 2, Role: "user", Content: "I built a service.", Timestamp: time.Now()},
-		{EventType: "turn", InterviewID: interviewID, OrgID: orgID, TurnNumber: 2, Role: "assistant", Content: "How did you test it?", Timestamp: time.Now()},
+		{InterviewID: interviewID, OrgID: orgID, TurnNumber: 1, Role: model.RoleParticipant, Content: "Hi", Timestamp: time.Now()},
+		{InterviewID: interviewID, OrgID: orgID, TurnNumber: 1, Role: model.RoleAssessor, Content: "Hello", Timestamp: time.Now()},
+		{InterviewID: interviewID, OrgID: orgID, TurnNumber: 2, Role: model.RoleParticipant, Content: "I built a service.", Timestamp: time.Now()},
+		{InterviewID: interviewID, OrgID: orgID, TurnNumber: 2, Role: model.RoleAssessor, Content: "How did you test it?", Timestamp: time.Now()},
 	}
 	for _, turn := range turns {
 		payload, _ := json.Marshal(turn)
@@ -153,11 +159,13 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("write turns failed: %v", err)
 		}
+		_, _ = pool.Exec(ctx, `INSERT INTO session_turns (session_id, org_id, turn_number, role, content) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+			interviewID, orgID, turn.TurnNumber, turn.Role, turn.Content)
 	}
 
 	compWriter := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
-		Topic:                  "interview.completed",
+		Topic:                  "session.completed",
 		Balancer:               &kafka.Hash{},
 		Transport:              transport,
 		AllowAutoTopicCreation: true,
@@ -166,16 +174,40 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 	defer compWriter.Close()
 
 	compEvt := model.InterviewCompletedEvent{
-		EventType: "completed", InterviewID: interviewID, OrgID: orgID, CandidateID: candidateID, DocketID: docketID, CompletedAt: time.Now(), TurnCount: 2,
+		InterviewID: interviewID, OrgID: orgID, CandidateID: candidateID, DocketID: docketID, CompletedAt: time.Now(), TurnCount: 2,
 	}
 	cb, _ := json.Marshal(compEvt)
 
 	// 3. Start an in-process worker, unless a running Docker worker is being verified.
 	jcsURL := os.Getenv("JOB_CANDIDATE_SERVICE_URL")
-	if jcsURL == "" {
+	externalWorker := os.Getenv("EXTERNAL_FEEDBACK_WORKER") == "true"
+	if !externalWorker && jcsURL == "" {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "/api/v1/dockets/") {
+				_ = json.NewEncoder(w).Encode(model.Docket{
+					ID:    docketID,
+					Title: "Test Docket",
+					Rubric: []model.RubricItem{
+						{ID: critID, Name: "Code Quality", Description: "desc", MaxScore: 10},
+					},
+				})
+				return
+			}
+			if strings.Contains(r.URL.Path, "/api/v1/candidates/") {
+				_ = json.NewEncoder(w).Encode(model.Candidate{
+					ID:       candidateID,
+					FullName: "Test Candidate",
+				})
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+		jcsURL = ts.URL
+	} else if jcsURL == "" {
 		jcsURL = "http://localhost:8001"
 	}
-	externalWorker := os.Getenv("EXTERNAL_FEEDBACK_WORKER") == "true"
 	jcsClient := client.NewJCSClient(jcsURL, "default-internal-secret-key-change-in-prod")
 	mockLLM := &CountingMockLLM{client: llm.NewMockFeedbackLLMClient()}
 	repo := repository.NewFeedbackRepository(pool)
@@ -207,18 +239,18 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 	}
 	var status string
 	for i := 0; i < maxPolls; i++ {
-		err = pool.QueryRow(ctx, "SELECT status FROM interviews WHERE id = $1", interviewID).Scan(&status)
+		err = pool.QueryRow(ctx, "SELECT status FROM assessment_sessions WHERE id = $1", interviewID).Scan(&status)
 		if err != nil {
 			t.Fatalf("query status failed: %v", err)
 		}
-		if status == "feedback_ready" {
+		if status == "evaluation_ready" || status == "feedback_ready" {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	if status != "feedback_ready" {
-		t.Fatalf("expected status feedback_ready, got %s", status)
+	if status != "evaluation_ready" && status != "feedback_ready" {
+		t.Fatalf("expected status evaluation_ready or feedback_ready, got %s", status)
 	}
 
 	if !externalWorker {
@@ -227,7 +259,7 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 	}
 
 	var count int
-	err = pool.QueryRow(ctx, "SELECT count(1) FROM feedback_reports WHERE interview_id = $1", interviewID).Scan(&count)
+	err = pool.QueryRow(ctx, "SELECT count(1) FROM evaluation_reports WHERE interview_id = $1", interviewID).Scan(&count)
 	if err != nil {
 		t.Fatalf("query reports: %v", err)
 	}
@@ -255,7 +287,7 @@ func TestFeedbackWorker_Integration(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 
-	err = pool.QueryRow(ctx, "SELECT count(1) FROM feedback_reports WHERE interview_id = $1", interviewID).Scan(&count)
+	err = pool.QueryRow(ctx, "SELECT count(1) FROM evaluation_reports WHERE interview_id = $1", interviewID).Scan(&count)
 	if err != nil {
 		t.Fatalf("query reports after replay: %v", err)
 	}

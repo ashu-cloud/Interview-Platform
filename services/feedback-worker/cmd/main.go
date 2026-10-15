@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,24 +38,21 @@ func main() {
 	}
 	defer pool.Close()
 
-	repo := repository.NewFeedbackRepository(pool)
-	jcs := client.NewJCSClient(cfg.JobCandidateServiceURL, cfg.InternalAPIKey)
-	var llmClient worker.LLMClient
+	evalRepo := repository.NewFeedbackRepository(pool)
+	transcriptRepo := repository.NewTranscriptRepository(pool)
+	platformClient := client.NewPlatformClient(cfg.JobCandidateServiceURL, cfg.InternalAPIKey)
+
+	var llmClient llm.EvaluationLLM
 	if cfg.LLMMode == "mock" {
-		llmClient = llm.NewMockFeedbackLLMClient()
-		logger.Info("using mock feedback LLM")
+		llmClient = llm.NewMockEvaluationLLMClient()
+		logger.Info("using mock evaluation LLM")
 	} else {
-		llmClient = llm.NewGroqFeedbackLLMClient(cfg.GroqAPIKey)
-		logger.Info("using Groq feedback LLM", "model", "llama-3.3-70b-versatile")
+		llmClient = llm.NewGroqEvaluationLLMClient(cfg.GroqAPIKey)
+		logger.Info("using Groq evaluation LLM", "model", "llama-3.3-70b-versatile")
 	}
 
-	// Since brokers might be a comma-separated list
-	brokers := strings.Split(cfg.KafkaBrokers, ",")
-	for i := range brokers {
-		brokers[i] = strings.TrimSpace(brokers[i])
-	}
-
-	w := worker.NewFeedbackWorker(brokers, jcs, llmClient, repo, logger, nil)
+	evaluator := worker.NewEvaluator(llmClient, logger)
+	w := worker.NewEvaluationWorker(cfg, evalRepo, transcriptRepo, platformClient, evaluator, llmClient, logger, nil)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -64,7 +60,7 @@ func main() {
 
 	go func() {
 		<-sigCh
-		logger.Info("shutting down feedback worker")
+		logger.Info("shutting down evaluation worker")
 		cancel()
 		w.Close()
 	}()
@@ -75,3 +71,4 @@ func main() {
 	}
 	logger.Info("worker stopped normally")
 }
+

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
-	KafkaBrokers           string
+	KafkaBrokers           string        // optional — empty -> outbox mode
+	PollInterval           time.Duration // default: 500ms
 	DatabaseURL            string
 	JobCandidateServiceURL string
 	InternalAPIKey         string
@@ -16,23 +18,43 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	c := &Config{
-		KafkaBrokers:           os.Getenv("KAFKA_BROKERS"),
-		DatabaseURL:            os.Getenv("DATABASE_URL"),
-		JobCandidateServiceURL: os.Getenv("JOB_CANDIDATE_SERVICE_URL"),
-		InternalAPIKey:         os.Getenv("INTERNAL_API_KEY"),
-		GroqAPIKey:             os.Getenv("GROQ_API_KEY"),
-		LLMMode:                strings.ToLower(strings.TrimSpace(os.Getenv("FEEDBACK_LLM_MODE"))),
+	pollInterval := 500 * time.Millisecond
+	if envPoll := os.Getenv("POLL_INTERVAL"); envPoll != "" {
+		if d, err := time.ParseDuration(envPoll); err == nil && d > 0 {
+			pollInterval = d
+		}
+	} else if envPoll := os.Getenv("OUTBOX_POLL_INTERVAL"); envPoll != "" {
+		if d, err := time.ParseDuration(envPoll); err == nil && d > 0 {
+			pollInterval = d
+		}
 	}
 
-	if c.KafkaBrokers == "" {
-		return nil, fmt.Errorf("KAFKA_BROKERS is required")
+	serviceURL := os.Getenv("PLATFORM_SERVICE_URL")
+	if serviceURL == "" {
+		serviceURL = os.Getenv("JOB_CANDIDATE_SERVICE_URL")
 	}
+
+	llmMode := os.Getenv("EVALUATION_LLM_MODE")
+	if llmMode == "" {
+		llmMode = os.Getenv("FEEDBACK_LLM_MODE")
+	}
+	llmMode = strings.ToLower(strings.TrimSpace(llmMode))
+
+	c := &Config{
+		KafkaBrokers:           strings.TrimSpace(os.Getenv("KAFKA_BROKERS")),
+		PollInterval:           pollInterval,
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		JobCandidateServiceURL: serviceURL,
+		InternalAPIKey:         os.Getenv("INTERNAL_API_KEY"),
+		GroqAPIKey:             os.Getenv("GROQ_API_KEY"),
+		LLMMode:                llmMode,
+	}
+
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 	if c.JobCandidateServiceURL == "" {
-		return nil, fmt.Errorf("JOB_CANDIDATE_SERVICE_URL is required")
+		return nil, fmt.Errorf("PLATFORM_SERVICE_URL or JOB_CANDIDATE_SERVICE_URL is required")
 	}
 	if c.InternalAPIKey == "" {
 		return nil, fmt.Errorf("INTERNAL_API_KEY is required")
@@ -41,11 +63,12 @@ func Load() (*Config, error) {
 		c.LLMMode = "groq"
 	}
 	if c.LLMMode != "groq" && c.LLMMode != "mock" {
-		return nil, fmt.Errorf("FEEDBACK_LLM_MODE must be groq or mock")
+		return nil, fmt.Errorf("EVALUATION_LLM_MODE must be groq or mock")
 	}
 	if c.LLMMode == "groq" && c.GroqAPIKey == "" {
-		return nil, fmt.Errorf("GROQ_API_KEY is required when FEEDBACK_LLM_MODE is groq")
+		return nil, fmt.Errorf("GROQ_API_KEY is required when EVALUATION_LLM_MODE is groq")
 	}
 
 	return c, nil
 }
+

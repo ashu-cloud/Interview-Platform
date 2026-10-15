@@ -16,25 +16,97 @@ import (
 	"github.com/yourusername/ai-interview/services/feedback-worker/internal/model"
 )
 
-type FeedbackLLMClient struct {
+type CriterionLLMResponse struct {
+	CriterionID    string `json:"criterion_id"`
+	Score          int    `json:"score"`
+	EvidenceTurnID string `json:"evidence_turn_id"`
+	EvidenceQuote  string `json:"evidence_quote"`
+}
+
+type EvaluationLLM interface {
+	EvaluateCriterion(ctx context.Context, prompt string) (*CriterionLLMResponse, error)
+	GenerateSummary(ctx context.Context, prompt string) (string, error)
+}
+
+type EvaluationLLMClient struct {
 	APIKey     string
 	BaseURL    string
 	Model      string
 	HTTPClient *http.Client
 }
 
-// MockFeedbackLLMClient produces deterministic rubric-complete feedback for local demos.
-// It intentionally derives criterion IDs and maximum scores from the prompt, so it exercises
-// the same validation and persistence path as a real provider response.
-type MockFeedbackLLMClient struct{}
+type FeedbackLLMClient = EvaluationLLMClient
 
-func NewMockFeedbackLLMClient() *MockFeedbackLLMClient {
-	return &MockFeedbackLLMClient{}
+type MockEvaluationLLMClient struct{}
+
+type MockFeedbackLLMClient = MockEvaluationLLMClient
+
+func NewMockEvaluationLLMClient() *MockEvaluationLLMClient {
+	return &MockEvaluationLLMClient{}
 }
 
-var rubricLinePattern = regexp.MustCompile(`(?m)^- \[([0-9a-fA-F-]{36})\].*?\(max (\d+) points\):`)
+func NewMockFeedbackLLMClient() *MockFeedbackLLMClient {
+	return NewMockEvaluationLLMClient()
+}
 
-func (c *MockFeedbackLLMClient) GenerateFeedback(_ context.Context, prompt string) (*model.FeedbackResponse, error) {
+var (
+	rubricLinePattern       = regexp.MustCompile(`(?m)^- \[([0-9a-fA-F-]{36})\].*?\(max (\d+) points\):`)
+	criterionIDPattern      = regexp.MustCompile(`"criterion_id":\s*"([^"]+)"`)
+	maxScorePattern         = regexp.MustCompile(`MAX SCORE:\s*(\d+)`)
+	turnParticipantPattern  = regexp.MustCompile(`(?m)Turn \d+ \[participant\] \(id:([a-zA-Z0-9-]+)\):\s*([^\r\n]+)`)
+	turnAnyPattern          = regexp.MustCompile(`(?m)Turn \d+ \[[^\]]+\] \(id:([a-zA-Z0-9-]+)\):\s*([^\r\n]+)`)
+)
+
+func (c *MockEvaluationLLMClient) EvaluateCriterion(_ context.Context, prompt string) (*CriterionLLMResponse, error) {
+	criterionID := ""
+	if m := criterionIDPattern.FindStringSubmatch(prompt); len(m) > 1 {
+		criterionID = m[1]
+	}
+
+	maxScore := 10
+	if m := maxScorePattern.FindStringSubmatch(prompt); len(m) > 1 {
+		if s, err := strconv.Atoi(m[1]); err == nil && s > 0 {
+			maxScore = s
+		}
+	}
+
+	turnID := ""
+	quote := ""
+
+	matches := turnParticipantPattern.FindAllStringSubmatch(prompt, -1)
+	if len(matches) == 0 {
+		matches = turnAnyPattern.FindAllStringSubmatch(prompt, -1)
+	}
+
+	if len(matches) > 0 {
+		turnID = matches[0][1]
+		content := strings.TrimSpace(matches[0][2])
+		words := strings.Fields(content)
+		if len(words) > 15 {
+			quote = strings.Join(words[:15], " ")
+		} else {
+			quote = content
+		}
+	}
+
+	score := int(math.Round(float64(maxScore) * 0.75))
+	if score > maxScore {
+		score = maxScore
+	}
+
+	return &CriterionLLMResponse{
+		CriterionID:    criterionID,
+		Score:          score,
+		EvidenceTurnID: turnID,
+		EvidenceQuote:  quote,
+	}, nil
+}
+
+func (c *MockEvaluationLLMClient) GenerateSummary(_ context.Context, prompt string) (string, error) {
+	return "The participant demonstrated strong competence across evaluated criteria. Responses were structured, technical decisions were well-justified, and communication remained clear and evidence-grounded throughout the session.", nil
+}
+
+func (c *MockEvaluationLLMClient) GenerateFeedback(_ context.Context, prompt string) (*model.FeedbackResponse, error) {
 	matches := rubricLinePattern.FindAllStringSubmatch(prompt, -1)
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("mock feedback could not find rubric criteria in prompt")
@@ -73,15 +145,15 @@ func (c *MockFeedbackLLMClient) GenerateFeedback(_ context.Context, prompt strin
 		overall = math.Round((float64(total)/float64(possible)*10)*10) / 10
 	}
 	return &model.FeedbackResponse{
-		Summary:        "Mock local evaluation generated from the completed interview transcript. Configure FEEDBACK_LLM_MODE=groq with GROQ_API_KEY to use a live model.",
+		Summary:        "Mock local evaluation generated from the completed interview transcript. Configure EVALUATION_LLM_MODE=groq with GROQ_API_KEY to use a live model.",
 		OverallScore:   overall,
 		Recommendation: "hire",
 		Scores:         scores,
 	}, nil
 }
 
-func NewFeedbackLLMClient(apiKey string) *FeedbackLLMClient {
-	return &FeedbackLLMClient{
+func NewEvaluationLLMClient(apiKey string) *EvaluationLLMClient {
+	return &EvaluationLLMClient{
 		APIKey:  apiKey,
 		BaseURL: "https://api.openai.com/v1/chat/completions",
 		Model:   "gpt-4o",
@@ -91,15 +163,23 @@ func NewFeedbackLLMClient(apiKey string) *FeedbackLLMClient {
 	}
 }
 
-func NewGroqFeedbackLLMClient(apiKey string) *FeedbackLLMClient {
-	return &FeedbackLLMClient{
+func NewFeedbackLLMClient(apiKey string) *EvaluationLLMClient {
+	return NewEvaluationLLMClient(apiKey)
+}
+
+func NewGroqEvaluationLLMClient(apiKey string) *EvaluationLLMClient {
+	return &EvaluationLLMClient{
 		APIKey:  apiKey,
 		BaseURL: "https://api.groq.com/openai/v1/chat/completions",
-		Model:   "openai/gpt-oss-120b",
+		Model:   "llama-3.3-70b-versatile",
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
 	}
+}
+
+func NewGroqFeedbackLLMClient(apiKey string) *EvaluationLLMClient {
+	return NewGroqEvaluationLLMClient(apiKey)
 }
 
 type openaiMessage struct {
@@ -112,7 +192,7 @@ type openaiRequest struct {
 	Messages       []openaiMessage   `json:"messages"`
 	Temperature    float64           `json:"temperature"`
 	MaxTokens      int               `json:"max_tokens"`
-	ResponseFormat map[string]string `json:"response_format"`
+	ResponseFormat map[string]string `json:"response_format,omitempty"`
 }
 
 type openaiResponse struct {
@@ -123,7 +203,7 @@ type openaiResponse struct {
 	} `json:"choices"`
 }
 
-func (c *FeedbackLLMClient) GenerateFeedback(ctx context.Context, prompt string) (*model.FeedbackResponse, error) {
+func (c *EvaluationLLMClient) callOpenAI(ctx context.Context, prompt string, temperature float64, jsonObject bool, maxTokens int) (string, error) {
 	modelName := c.Model
 	if modelName == "" {
 		modelName = "llama-3.3-70b-versatile"
@@ -134,10 +214,9 @@ func (c *FeedbackLLMClient) GenerateFeedback(ctx context.Context, prompt string)
 	}
 
 	reqBody := openaiRequest{
-		Model:          modelName,
-		Temperature:    0.3,
-		MaxTokens:      2000,
-		ResponseFormat: map[string]string{"type": "json_object"},
+		Model:       modelName,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
 		Messages: []openaiMessage{
 			{
 				Role:    "user",
@@ -145,41 +224,80 @@ func (c *FeedbackLLMClient) GenerateFeedback(ctx context.Context, prompt string)
 			},
 		},
 	}
+	if jsonObject {
+		reqBody.ResponseFormat = map[string]string{"type": "json_object"}
+	}
 
 	b, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshal req: %w", err)
+		return "", fmt.Errorf("marshal req: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(b))
 	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+		return "", fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
+		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
 		_, _ = errBody.ReadFrom(resp.Body)
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, errBody.String())
+		return "", fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, errBody.String())
 	}
 
 	var res openaiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, fmt.Errorf("decode res: %w", err)
+		return "", fmt.Errorf("decode res: %w", err)
 	}
 
 	if len(res.Choices) == 0 {
-		return nil, fmt.Errorf("no choices returned")
+		return "", fmt.Errorf("no choices returned")
 	}
 
-	content := res.Choices[0].Message.Content
+	return res.Choices[0].Message.Content, nil
+}
+
+func (c *EvaluationLLMClient) EvaluateCriterion(ctx context.Context, prompt string) (*CriterionLLMResponse, error) {
+	content, err := c.callOpenAI(ctx, prompt, 0.1, true, 500)
+	if err != nil {
+		// One retry
+		content, err = c.callOpenAI(ctx, prompt, 0.1, true, 500)
+		if err != nil {
+			return nil, fmt.Errorf("call LLM for criterion: %w", err)
+		}
+	}
+
+	var result CriterionLLMResponse
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, fmt.Errorf("unmarshal criterion LLM response: %w (raw: %s)", err, content)
+	}
+
+	return &result, nil
+}
+
+func (c *EvaluationLLMClient) GenerateSummary(ctx context.Context, prompt string) (string, error) {
+	content, err := c.callOpenAI(ctx, prompt, 0.3, false, 1500)
+	if err != nil {
+		content, err = c.callOpenAI(ctx, prompt, 0.3, false, 1500)
+		if err != nil {
+			return "", fmt.Errorf("call LLM for summary: %w", err)
+		}
+	}
+	return strings.TrimSpace(content), nil
+}
+
+func (c *EvaluationLLMClient) GenerateFeedback(ctx context.Context, prompt string) (*model.FeedbackResponse, error) {
+	content, err := c.callOpenAI(ctx, prompt, 0.3, true, 2000)
+	if err != nil {
+		return nil, err
+	}
 
 	var feedback model.FeedbackResponse
 	if err := json.Unmarshal([]byte(content), &feedback); err != nil {
@@ -188,3 +306,4 @@ func (c *FeedbackLLMClient) GenerateFeedback(ctx context.Context, prompt string)
 
 	return &feedback, nil
 }
+
