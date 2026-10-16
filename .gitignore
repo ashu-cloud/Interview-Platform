@@ -74,4 +74,7 @@ AI_INTERVIEW_PLATFORM_IMPLEMENTATION_AUDIT.md
 design.md
 stitch_screens/
 legacy_frontend/
-docs/
+
+# Personal application documents & resume artifacts (NEVER COMMIT)
+docs/VOXASSESS_RESUME_BULLET_BANK.md
+docs/resume/

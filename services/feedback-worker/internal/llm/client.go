@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -264,6 +265,113 @@ func (c *EvaluationLLMClient) callOpenAI(ctx context.Context, prompt string, tem
 	return res.Choices[0].Message.Content, nil
 }
 
+var (
+	ErrMalformedOutput       = errors.New("malformed LLM output")
+	ErrTruncatedOutput       = errors.New("truncated LLM output")
+	ErrMissingRequiredFields = errors.New("missing required fields in LLM output")
+)
+
+// ParseCriterionResponse parses and validates an LLM criterion evaluation response with bounded recovery.
+func ParseCriterionResponse(content string) (*CriterionLLMResponse, error) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil, fmt.Errorf("%w: empty response", ErrMalformedOutput)
+	}
+
+	// 1. Strip markdown code fences if present
+	if strings.HasPrefix(trimmed, "```json") {
+		trimmed = strings.TrimPrefix(trimmed, "```json")
+		trimmed = strings.TrimSuffix(trimmed, "```")
+		trimmed = strings.TrimSpace(trimmed)
+	} else if strings.HasPrefix(trimmed, "```") {
+		trimmed = strings.TrimPrefix(trimmed, "```")
+		trimmed = strings.TrimSuffix(trimmed, "```")
+		trimmed = strings.TrimSpace(trimmed)
+	}
+
+	// 2. Locate JSON object boundary
+	firstBrace := strings.Index(trimmed, "{")
+	if firstBrace < 0 {
+		return nil, fmt.Errorf("%w: missing opening brace in %q", ErrMalformedOutput, trimmed)
+	}
+
+	lastBrace := strings.LastIndex(trimmed, "}")
+	var rawJSON string
+	if lastBrace > firstBrace {
+		rawJSON = trimmed[firstBrace : lastBrace+1]
+	} else {
+		// Truncated: no closing brace found
+		rawCandidate := trimmed[firstBrace:]
+		recovered := attemptBoundedTruncationRepair(rawCandidate)
+		if recovered == "" {
+			return nil, fmt.Errorf("%w: unrecoverable truncated JSON %q", ErrTruncatedOutput, rawCandidate)
+		}
+		rawJSON = recovered
+	}
+
+	// 3. Unmarshal into generic map to verify presence of required keys
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(rawJSON), &rawMap); err != nil {
+		recovered := attemptBoundedTruncationRepair(rawJSON)
+		if recovered != "" && json.Unmarshal([]byte(recovered), &rawMap) == nil {
+			rawJSON = recovered
+		} else {
+			return nil, fmt.Errorf("%w: %v (raw: %s)", ErrMalformedOutput, err, rawJSON)
+		}
+	}
+
+	// 4. Validate required fields
+	criterionRaw, hasCrit := rawMap["criterion_id"]
+	scoreRaw, hasScore := rawMap["score"]
+	if !hasCrit || !hasScore {
+		return nil, fmt.Errorf("%w: criterion_id or score missing", ErrMissingRequiredFields)
+	}
+
+	var critID string
+	if err := json.Unmarshal(criterionRaw, &critID); err != nil || strings.TrimSpace(critID) == "" {
+		return nil, fmt.Errorf("%w: invalid or empty criterion_id", ErrMissingRequiredFields)
+	}
+
+	var score int
+	if err := json.Unmarshal(scoreRaw, &score); err != nil {
+		return nil, fmt.Errorf("%w: invalid non-integer score: %v", ErrMalformedOutput, err)
+	}
+
+	var turnID string
+	if tidRaw, ok := rawMap["evidence_turn_id"]; ok {
+		_ = json.Unmarshal(tidRaw, &turnID)
+	}
+
+	var quote string
+	if qRaw, ok := rawMap["evidence_quote"]; ok {
+		_ = json.Unmarshal(qRaw, &quote)
+	}
+
+	return &CriterionLLMResponse{
+		CriterionID:    strings.TrimSpace(critID),
+		Score:          score,
+		EvidenceTurnID: strings.TrimSpace(turnID),
+		EvidenceQuote:  strings.TrimSpace(quote),
+	}, nil
+}
+
+func attemptBoundedTruncationRepair(raw string) string {
+	raw = strings.TrimSpace(raw)
+	// If unclosed quote
+	quoteCount := strings.Count(raw, `"`)
+	if quoteCount%2 != 0 {
+		raw += `"`
+	}
+	if !strings.HasSuffix(raw, "}") {
+		raw += "}"
+	}
+	var testMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &testMap); err == nil {
+		return raw
+	}
+	return ""
+}
+
 func (c *EvaluationLLMClient) EvaluateCriterion(ctx context.Context, prompt string) (*CriterionLLMResponse, error) {
 	content, err := c.callOpenAI(ctx, prompt, 0.1, true, 500)
 	if err != nil {
@@ -274,12 +382,7 @@ func (c *EvaluationLLMClient) EvaluateCriterion(ctx context.Context, prompt stri
 		}
 	}
 
-	var result CriterionLLMResponse
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil, fmt.Errorf("unmarshal criterion LLM response: %w (raw: %s)", err, content)
-	}
-
-	return &result, nil
+	return ParseCriterionResponse(content)
 }
 
 func (c *EvaluationLLMClient) GenerateSummary(ctx context.Context, prompt string) (string, error) {

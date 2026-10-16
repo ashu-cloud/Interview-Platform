@@ -1,154 +1,133 @@
-# AI Interview Platform
+# VoxAssess — Low-Latency Adaptive Voice Assessment Platform
 
-An enterprise AI-powered interview platform designed for automated, structured technical and behavioral candidate assessments with real-time voice streaming and asynchronous evaluation reports.
+VoxAssess is an enterprise-grade AI voice platform designed for automated, structured technical and behavioral candidate assessments. It features real-time bidirectional audio streaming, speculative RAG prefetching, adaptive competency steering, and asynchronous rubric evaluations with verbatim evidence attribution.
 
 ---
 
-## Architecture & Tech Stack
+## Architecture Highlights
 
-- **Go 1.22** microservices
-- **PostgreSQL 16**: Relational storage for organizations, users, job roles, interview dockets, candidates, invites, interviews, and feedback reports
-- **Redis 7.2**: Distributed session state, invite token caching, and distributed concurrency locking
-- **Apache Kafka 3.7 (KRaft mode)**: Asynchronous event streams (`interview.turns`, `interview.completed`, `notification.events`)
-- **Nginx Reverse Proxy & Static Web Host**: Directs HTTP `/api/` traffic to `job-candidate-service`, upgrades WebSocket `/ws/` traffic to `interview-orchestrator`, and serves the frontend dashboard at port `8080` (declarative Apache APISIX routes also available in `gateway/apisix/`)
-- **AI & Voice Pipeline**:
-  - **Speech-to-Text (STT)**: Deepgram Nova-2 streaming transcription
-  - **LLM Engine**: Groq (Llama 3.3 70B Versatile) for ultra-low latency streaming turns, with OpenAI / Anthropic fallback pool and offline demo mode
-  - **Text-to-Speech (TTS)**: ElevenLabs streaming voice synthesis
-### High Level Design (HLD) Architecture
-
-```mermaid
-flowchart TD
-    subgraph Client["Clients & Web Interface"]
-        Browser["Web Browser (Candidate & Hiring Manager)"]
-    end
-
-    subgraph Gateway["Edge Gateway (:8080)"]
-        Nginx["Nginx Reverse Proxy & Static Host"]
-    end
-
-    subgraph CoreServices["Microservices (Go 1.22)"]
-        JCS["Job Candidate Service (:8001)<br/>• Auth & Multi-tenant Organizations<br/>• Jobs, Dockets & Candidates<br/>• Invite Token Caching"]
-        Orchestrator["Interview Orchestrator (:8002)<br/>• Real-time WebSocket Protocol<br/>• Distributed Lock & Session State<br/>• Conversational Turn Orchestration"]
-    end
-
-    subgraph AIPipeline["AI & Voice Pipeline"]
-        Deepgram["Deepgram Nova-2 (STT)"]
-        Groq["Groq Llama 3.3 70B (LLM)"]
-        ElevenLabs["ElevenLabs (TTS)"]
-    end
-
-    subgraph EventTier["Asynchronous Event Streaming (Kafka)"]
-        Kafka["Apache Kafka (KRaft mode)<br/>• interview.turns<br/>• interview.completed<br/>• notification.events"]
-        FeedbackWorker["Feedback Worker<br/>• Asynchronous Transcript Evaluation<br/>• Rubric Scoring Engine<br/>• Auto-generates Feedback Reports"]
-        NotifyWorker["Notification Service<br/>• Automated Email Alerts (Resend)"]
-    end
-
-    subgraph DataTier["Data Tier"]
-        Postgres[("PostgreSQL 16<br/>Relational Data Store")]
-        Redis[("Redis 7.2<br/>Distributed Locking & Session Cache")]
-    end
-
-    Browser -->|HTTP /api/| Nginx
-    Browser -->|WebSocket /ws/| Nginx
-    Nginx -->|REST /api/| JCS
-    Nginx -->|WebSocket /ws/| Orchestrator
-
-    JCS --> Postgres
-    JCS --> Redis
-
-    Orchestrator --> Redis
-    Orchestrator -->|Internal REST| JCS
-    Orchestrator --> Deepgram
-    Orchestrator --> Groq
-    Orchestrator --> ElevenLabs
-    Orchestrator -->|Publish Turns & Completed| Kafka
-
-    Kafka -->|Consume Events| FeedbackWorker
-    Kafka -->|Consume Events| NotifyWorker
-    FeedbackWorker --> Groq
-    FeedbackWorker --> Postgres
-    NotifyWorker --> Postgres
+```
++--------------------------------------------------------------------------------------------------+
+| TRACK 1: REAL-TIME VOICE PIPELINE (Sub-second critical path, in-memory, non-blocking)           |
+|                                                                                                  |
+| [Candidate Browser] <=== Full-Duplex PCM WebSocket ===> [interview-orchestrator]                |
+|                                                                 |                                |
+|        +-------------------------+------------------------------+--------------------+           |
+|        |                         |                              |                    |           |
+|  [Streaming STT]       [Speculative Prefetch]            [Streaming LLM]       [Streaming TTS]   |
+| (Deepgram Nova-2)      (pgvector + Redis Cache)        (Groq Llama 3.3 70B)  (ElevenLabs Turbo)  |
+|                                                                 |                                |
+|        +--------------------------------------------------------+                                |
+|        v (Pipelined Sentence Synthesis: p50 = 273.7ms dead-air delay)                            |
+|        v (Barge-in Interruption: Cancels in-flight turns & truncates history to delivered audio) |
++--------------------------------------------------------------------------------------------------+
+                                  |
+               (Non-blocking async outbox / Kafka events)
+                                  |
+                                  v
++--------------------------------------------------------------------------------------------------+
+| TRACK 2: ASYNC PROJECTION & GROUNDED EVALUATION (ACID, idempotent, concurrency-bounded)          |
+|                                                                                                  |
+| Event Bus (Dual-Mode):                                                                           |
+|   - Local Dev: Apache Kafka 3.7 (session.turns, session.completed)                               |
+|   - Cloud/Low-RAM: PostgreSQL Outbox (FOR UPDATE SKIP LOCKED, zero broker overhead)             |
+|                                                                                                  |
+| Workers:                                                                                         |
+|   - turn-projector: Ingests turns idempotently into session_turns                                |
+|   - feedback-worker: Bounded-concurrent (N=5) evaluation with verbatim quote attribution        |
+|   - notification-service: Event-driven alerts and email dispatch via Resend                      |
++--------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## Services & Ports
+## Core Engineering Innovations
 
-| Service | Internal Port | Host Port | Description |
-| :--- | :--- | :--- | :--- |
-| **Frontend / Reverse Proxy** | `:80` | `http://localhost:8080` | Web UI & API Gateway routing |
-| **Job Candidate Service** | `:8001` | `127.0.0.1:8003` | REST API for auth, jobs, dockets, candidates, and invites |
-| **Interview Orchestrator** | `:8002` | `127.0.0.1:8004` | WebSocket service managing real-time voice turns & AI dialogue |
-| **Feedback Worker** | — | — | Kafka consumer analyzing interview transcripts to generate structured rubric reports |
-| **Notification Service** | — | — | Kafka consumer dispatching invite and completion alerts (Resend) |
-| **PostgreSQL** | `:5432` | `127.0.0.1:5432` | Primary database |
-| **Redis** | `:6379` | `127.0.0.1:6379` | Distributed cache and locking |
-| **Kafka** | `:9092` | `127.0.0.1:9092` | Event broker |
+### 1. Pipelined Sentence Synthesis (2.8x Speedup)
+Conventional voice bots await full LLM token completion (45+ tokens) before synthesizing speech, causing 750ms–1,200ms of dead air. VoxAssess segments incoming LLM streams at terminal punctuation boundaries (`.`, `!`, `?`), streaming Sentence 1 to ElevenLabs Turbo while Sentence 2 continues generating.
+- **Sequential Baseline**: $\text{p50} = 753.9\text{ms}$.
+- **Pipelined Treatment**: $\text{p50} = 273.7\text{ms}$ (**480.2ms dead-air reduction**).
+
+### 2. Speculative RAG Retrieval & Prefetching
+While the candidate speaks, interim STT hypotheses trigger background embedding generation (`text-embedding-3-small`) and nearest-neighbor vector search over blueprint rubric criteria. Results are cached in Redis (`rag:prefetch:{session}:{turn}`).
+- **Prefetched Cache Hit Retrieval**: **1.15ms** (p50) on critical path.
+- **Cold Query Fallback**: 64.8ms (p50) bounded by a strict 150ms timeout that falls back to static rubric criteria on timeout or network jitter.
+
+### 3. Adaptive 3-Factor Competency Steering
+Rather than executing static question lists, the orchestrator computes live candidate competency deficits across three mathematical dimensions:
+- **Topic Coverage**: Monotonic historical max similarity.
+- **Demonstrated Competence**: Capped at $0.50$ on single mentions; requires $\ge 2$ substantive turns to reach full score.
+- **Recency Decay**: Exponential decay ($0.85^{\Delta \text{turns}}$) to prevent unaddressed criteria from being starved of follow-up questions.
+- Injects dynamic `CURRENT FOCUS:` directives into the interviewer system prompt.
+
+### 4. Evidence Grounding & Verbatim Quote Attribution
+Automated evaluation reports reject hallucinated evidence quotes. The `IsSubstantiveEvidence` contract requires $\ge 3$ substantive words or $\ge 15$ characters, filters conversational stop-tokens (*"yes"*, *"sure"*, *"okay"*), and verifies exact substring matching against the candidate transcript, dropping affirmative false accepts from **80.0% to 0.0%**.
 
 ---
 
-## Quick Start
+## Specialized Architecture Documentation
+
+Detailed sequence diagrams, failure modes, code citations, and empirical measurements:
+
+- **[Real-Time Voice Pipeline Flow](docs/voice_pipeline_flow.md)**: PCM audio framing, Deepgram streaming, pipelined TTS, barge-in interruption, sequence barriers.
+- **[Speculative RAG Retrieval & Prefetch Flow](docs/speculative_retrieval_flow.md)**: End-to-end prefetch trace, pgvector queries, Redis caching, 150ms budget, and semantic drift mitigation.
+- **[Adaptive Competency Steering](docs/adaptive_competency_steering.md)**: 3-factor formulation, deficit calculation, and dynamic prompt injection.
+- **[Asynchronous Evaluation & Grounding Pipeline](docs/evaluation_and_grounding_flow.md)**: Completeness barriers, $N=5$ scatter-gather grading, JSON repair, and quote verification.
+- **[System Architecture Guide](docs/architecture.md)**: Dual-track architecture, database schema, Redis keys, and deployment topologies.
+- **[REST & WebSocket API Reference](docs/api.md)**: Endpoints, authentication, and payload schemas.
+
+---
+
+## Services & Port Topology
+
+| Service | Directory | Port | Protocol | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Frontend Gateway** | `frontend/` | `:8080` | HTTP / WS | Next.js 14 App Router UI & Nginx Reverse Proxy |
+| **Platform Service** | `services/job-candidate-service` | `:8001` | HTTP REST | Auth, tracks, blueprints, prompts, rubric vectors, candidate invites |
+| **Session Runtime** | `services/interview-orchestrator` | `:8002` | WebSocket | Real-time voice orchestrator, STT, LLM, TTS, speculative RAG prefetch |
+| **Evaluation Worker** | `services/feedback-worker` | — | Kafka / Outbox | Grounded transcript assessment, rubric grading, JSON repair |
+| **Turn Projector** | `services/turn-projector` | — | Kafka / Outbox | Idempotent turn ingestion into relational `session_turns` |
+| **Notification Service** | `services/notification-service` | — | Kafka / Outbox | Candidate invite and completion notifications via Resend |
+| **PostgreSQL 16** | `migrations/` | `:5432` | SQL / pgvector | Relational data store with 768-dim vector embeddings |
+| **Redis 7.2** | — | `:6379` | RESP | Distributed mutex locks, session state, and RAG prefetch cache |
+| **Apache Kafka 3.7** | — | `:9092` | Kafka (KRaft) | Event broker for turns and completion events |
+
+---
+
+## Quick Start (Docker Compose)
 
 ### 1. Prerequisites
-- Docker & Docker Compose
-- (Optional for local testing without Docker) Go 1.22+
+- Docker Engine 24+ & Docker Compose v2
+- Go 1.22+ (for running local benchmarks)
 
-### 2. Configure Environment Variables
-Copy `.env.example` to `.env` and configure your credentials:
+### 2. Configure Environment
 ```bash
 cp .env.example .env
 ```
-> **Tip:** You can set `INTERVIEW_DEMO_MODE=true` in `.env` to run the entire interview flow locally without needing paid Deepgram, Groq, or ElevenLabs API keys.
+> **Offline Demo Mode**: Set `INTERVIEW_DEMO_MODE=true` in `.env` to execute the full interactive voice assessment pipeline locally without requiring paid API keys for Deepgram, Groq, or ElevenLabs.
 
-### 3. Start the Entire Platform
+### 3. Launch Services
 ```bash
-# Build and start all services in the background
 docker compose up -d
-
-# Run database migrations (run automatically on startup, or manually via):
-docker compose run --rm migrate
 ```
 
-### 4. Access the Application
-Open your browser and navigate to:
-```
-http://localhost:8080
-```
+### 4. Access the Web Dashboard
+Navigate to `http://localhost:8080` to log in, create an assessment track and blueprint, generate a candidate invite link, and conduct an automated voice interview.
 
 ---
 
-## End-to-End Walkthrough
+## Verification & Empirical Benchmarks
 
-1. **Hiring Manager Sign-up & Login**:
-   - Navigate to `http://localhost:8080` and click the **Register** tab to create an organization and manager account.
-2. **Create a Job Role**:
-   - Specify role title (e.g. *Senior Backend Engineer*), description, and required skills.
-3. **Create an Interview Docket**:
-   - Set instructions, interview duration, specific questions to ask, and rubric evaluation criteria (e.g., *System Design*, *Problem Solving* with max scores).
-4. **Add Candidate & Generate Invite Link**:
-   - Add candidate name and email, then generate a unique invite link.
-5. **Conduct the Candidate Interview**:
-   - Open the invite link in a browser tab.
-   - Click **Connect to interview** to begin. The AI welcomes the candidate and initiates the voice interview using the docket questions.
-   - Speak into your microphone and click **Start speaking** / **Stop speaking** to send turns.
-   - When finished, click **Complete interview**.
-6. **Automatic Evaluation Report**:
-   - The `feedback-worker` consumes the interview events from Kafka, evaluates the candidate transcript against the rubric criteria using the LLM, and publishes a structured evaluation report.
-   - View the feedback report, score breakdown, and strengths/weaknesses directly on the Hiring Manager dashboard.
-
----
-
-## Development & Testing
+The platform includes an automated benchmark suite under `bench/`:
 
 ```bash
-# Stop all containers
-docker compose down
+# Run the fair comparison microbenchmark suite (Pipelining, Prefetch, Scatter-Gather)
+cd bench
+go test -v -run=TestFairComparison
 
-# View live service logs
-docker compose logs -f
+# Run the 30-turn speculative prefetch replay harness
+go test -v -run=TestSpeculativeRetrievalReplayHarness
 
-# Run unit and integration tests
-cd services/job-candidate-service && go test ./...
-cd services/interview-orchestrator && go test ./...
+# Run all project benchmark suites
+go run run_benchmarks.go
 ```

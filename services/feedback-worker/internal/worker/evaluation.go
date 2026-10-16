@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -220,59 +221,144 @@ func (w *EvaluationWorker) processOutboxBatch(ctx context.Context) {
 	}
 }
 
+var (
+	ErrIncompleteTranscript = errors.New("incomplete transcript")
+	ErrEmptyTranscript      = errors.New("empty transcript")
+)
+
+// ValidateTranscriptCompleteness verifies all turns from turn 1 to expectedTurnCount are present.
+func ValidateTranscriptCompleteness(turns []SessionTurn, expectedTurnCount int) error {
+	if len(turns) == 0 {
+		return ErrEmptyTranscript
+	}
+	if expectedTurnCount <= 0 {
+		return nil
+	}
+
+	seenTurns := make(map[int]bool, len(turns))
+	highestTurn := 0
+	for _, t := range turns {
+		if t.TurnNumber > 0 {
+			seenTurns[t.TurnNumber] = true
+			if t.TurnNumber > highestTurn {
+				highestTurn = t.TurnNumber
+			}
+		}
+	}
+
+	var missingTurns []int
+	for k := 1; k <= expectedTurnCount; k++ {
+		if !seenTurns[k] {
+			missingTurns = append(missingTurns, k)
+		}
+	}
+
+	if len(missingTurns) > 0 {
+		return fmt.Errorf("%w: missing turns %v (found %d/%d turns, max seen: %d)",
+			ErrIncompleteTranscript, missingTurns, len(seenTurns), expectedTurnCount, highestTurn)
+	}
+
+	return nil
+}
+
 func (w *EvaluationWorker) waitForTranscript(ctx context.Context,
 	sessionID string, expectedMinTurns int) ([]SessionTurn, error) {
-	for attempt := 0; attempt < 5; attempt++ {
+
+	const maxAttempts = 5
+	backoff := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		turns, err := w.transcriptRepo.GetTranscript(ctx, sessionID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("get transcript: %w", err)
 		}
-		if len(turns) >= expectedMinTurns/2 || (len(turns) > 0 && attempt == 4) {
+
+		if err := ValidateTranscriptCompleteness(turns, expectedMinTurns); err == nil {
 			return turns, nil
 		}
-		w.logger.Info("waiting for turn projector",
-			"attempt", attempt, "found", len(turns))
+
+		w.logger.Info("waiting for turn projector completeness",
+			"attempt", attempt+1, "session_id", sessionID, "found_turns", len(turns), "expected_turn_count", expectedMinTurns)
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(time.Duration(1<<attempt) * time.Second):
+		case <-time.After(backoff):
+			backoff *= 2
 		}
 	}
-	return w.transcriptRepo.GetTranscript(ctx, sessionID)
+
+	turns, err := w.transcriptRepo.GetTranscript(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get transcript final attempt: %w", err)
+	}
+	if err := ValidateTranscriptCompleteness(turns, expectedMinTurns); err != nil {
+		return nil, fmt.Errorf("%w for session %s: %v", ErrIncompleteTranscript, sessionID, err)
+	}
+	return turns, nil
 }
 
 // AggregateScores computes overall score normalized to 0-10 and recommendation.
+// Malformed, incomplete, or errored criteria return an explicit error and "evaluation_failed",
+// preserving the distinction between candidate performance and system evaluation failure.
 func AggregateScores(results []CriterionResult,
-	criteria []model.EvaluationCriterion) (float64, string) {
+	criteria []model.EvaluationCriterion) (float64, string, error) {
 
-	maxByID := make(map[string]int)
+	if len(criteria) == 0 {
+		return 0, "incomplete", fmt.Errorf("no evaluation criteria provided")
+	}
+
+	maxByID := make(map[string]int, len(criteria))
 	for _, c := range criteria {
 		maxByID[c.ID] = c.MaxScore
 	}
 
 	var totalScore, totalMax float64
+	var failedCriteria []string
+	resultsByCrit := make(map[string]CriterionResult, len(results))
+
 	for _, r := range results {
+		resultsByCrit[r.CriterionID] = r
 		if r.Error != nil {
+			failedCriteria = append(failedCriteria, fmt.Sprintf("%s: %v", r.CriterionID, r.Error))
+			continue
+		}
+		maxScore, exists := maxByID[r.CriterionID]
+		if !exists {
 			continue
 		}
 		totalScore += float64(r.Score)
-		totalMax += float64(maxByID[r.CriterionID])
+		totalMax += float64(maxScore)
 	}
+
+	// Verify all blueprint criteria have results
+	for _, c := range criteria {
+		if _, ok := resultsByCrit[c.ID]; !ok {
+			failedCriteria = append(failedCriteria, fmt.Sprintf("%s: missing result", c.ID))
+		}
+	}
+
+	if len(failedCriteria) > 0 {
+		return 0, "evaluation_failed", fmt.Errorf("processing failure on %d criteria: %s",
+			len(failedCriteria), strings.Join(failedCriteria, "; "))
+	}
+
 	if totalMax == 0 {
-		return 0, "no_hire"
+		return 0, "evaluation_failed", fmt.Errorf("total maximum score is zero across criteria")
 	}
+
 	overall := (totalScore / totalMax) * 10.0
 	overall = math.Round(overall*10) / 10
 
 	switch {
 	case overall >= 8.0:
-		return overall, "strong_hire"
+		return overall, "strong_hire", nil
 	case overall >= 6.0:
-		return overall, "hire"
+		return overall, "hire", nil
 	case overall >= 4.0:
-		return overall, "no_hire"
+		return overall, "no_hire", nil
 	default:
-		return overall, "strong_no_hire"
+		return overall, "strong_no_hire", nil
 	}
 }
 
@@ -295,7 +381,7 @@ func (w *EvaluationWorker) processMessage(ctx context.Context,
 		return fmt.Errorf("get participant: %w", err)
 	}
 
-	// 3. O(1) transcript fetch from session_turns
+	// 3. O(1) transcript fetch from session_turns with completeness guarantee
 	turns, err := w.waitForTranscript(ctx, event.SessionID, event.TurnCount)
 	if err != nil {
 		return fmt.Errorf("transcript: %w", err)
@@ -312,7 +398,10 @@ func (w *EvaluationWorker) processMessage(ctx context.Context,
 	results = ValidateGrounding(results, turns)
 
 	// 6. Aggregate
-	overallScore, recommendation := AggregateScores(results, blueprint.Criteria)
+	overallScore, recommendation, err := AggregateScores(results, blueprint.Criteria)
+	if err != nil {
+		return fmt.Errorf("aggregate scores: %w", err)
+	}
 
 	// 7. Generate written summary (one additional LLM call after all scores known)
 	summary, err := w.generateSummary(ctx, participant.FullName,

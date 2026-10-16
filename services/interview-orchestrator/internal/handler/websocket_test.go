@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,4 +277,152 @@ func TestStreamingAudioAndInterruption(t *testing.T) {
 		t.Fatal("missing assessment_complete message")
 	}
 }
+
+type multiSentenceLLM struct{}
+
+func (multiSentenceLLM) GenerateResponse(ctx context.Context, _ string, _ []model.Message, streamChan chan<- string) error {
+	sentences := []string{
+		"Sentence one is delivered. ",
+		"Sentence two is generated ahead of time but candidate interrupts before playback. ",
+	}
+	for _, s := range sentences {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case streamChan <- s:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return nil
+}
+
+type testAudioTTS struct{}
+
+func (testAudioTTS) SynthesizeSentence(_ context.Context, _ string) ([]byte, error) {
+	return []byte{0x01, 0x02, 0x03}, nil
+}
+
+func (testAudioTTS) SynthesizeStream(_ context.Context, _ string, _ chan<- []byte) error {
+	return nil
+}
+
+func TestInterruptedAssessorHistoryTracksDeliveredText(t *testing.T) {
+	var trace []string
+	var savedSession *model.Session
+	var savedMu sync.Mutex
+	mgr := &testInterceptingSessionManager{
+		testSessionManager: testSessionManager{trace: &trace},
+		onSave: func(s *model.Session) {
+			savedMu.Lock()
+			defer savedMu.Unlock()
+			// clone
+			cp := *s
+			cp.ConversationHistory = append([]model.Message(nil), s.ConversationHistory...)
+			savedSession = &cp
+		},
+	}
+	pub := &testPublisher{trace: &trace}
+	h := NewWebSocketHandler(testJCS{}, mgr, stt.NewDemoAdapter(), llm.NewPool(multiSentenceLLM{}, multiSentenceLLM{}), testAudioTTS{}, pub)
+
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		h.HandleWS(w, r)
+	}))
+	defer srv.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/ws/interview/?token=test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Wait for connected
+	var msg WSMessage
+	if err := conn.ReadJSON(&msg); err != nil || msg.Type != "connected" {
+		t.Fatalf("expected connected, got %v (%v)", msg, err)
+	}
+
+	// Trigger audio_end
+	_ = conn.WriteJSON(WSMessage{Type: "audio_end", Data: "YQ==", MimeType: "audio/webm"})
+
+	// Read until we see the first ai_audio_chunk (Sentence 1 synthesized & sent)
+	sawFirstAudio := false
+	for {
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if msg.Type == "ai_audio_chunk" && msg.Sequence == 1 {
+			sawFirstAudio = true
+			// Interrupt immediately before Sentence 2 can be synthesized
+			_ = conn.WriteJSON(WSMessage{Type: "speech_started"})
+			break
+		}
+	}
+	if !sawFirstAudio {
+		t.Fatal("did not receive first audio chunk")
+	}
+
+	// Wait for ai_interrupted
+	for {
+		if err := conn.ReadJSON(&msg); err != nil {
+			break
+		}
+		if msg.Type == "ai_interrupted" {
+			break
+		}
+	}
+
+	_ = conn.WriteJSON(WSMessage{Type: "end_assessment"})
+	for {
+		if err := conn.ReadJSON(&msg); err != nil || msg.Type == "assessment_complete" {
+			break
+		}
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not terminate")
+	}
+
+	savedMu.Lock()
+	defer savedMu.Unlock()
+	if savedSession == nil {
+		t.Fatal("no session saved")
+	}
+
+	// Find the interrupted assessor message
+	var interruptedMsg *model.Message
+	for _, m := range savedSession.ConversationHistory {
+		if m.Role == "assessor" && strings.Contains(m.Content, "[interrupted]") {
+			interruptedMsg = &m
+			break
+		}
+	}
+	if interruptedMsg == nil {
+		t.Fatalf("missing interrupted assessor message in history: %+v", savedSession.ConversationHistory)
+	}
+
+	// It must contain sentence 1, and MUST NOT contain sentence 2!
+	if !strings.Contains(interruptedMsg.Content, "Sentence one is delivered.") {
+		t.Errorf("interrupted message missing delivered sentence 1: %q", interruptedMsg.Content)
+	}
+	if strings.Contains(interruptedMsg.Content, "Sentence two is generated ahead of time") {
+		t.Errorf("interrupted message leaked undelivered sentence 2 into history: %q", interruptedMsg.Content)
+	}
+}
+
+type testInterceptingSessionManager struct {
+	testSessionManager
+	onSave func(*model.Session)
+}
+
+func (m *testInterceptingSessionManager) SaveSession(ctx context.Context, sess *model.Session) error {
+	if m.onSave != nil {
+		m.onSave(sess)
+	}
+	return m.testSessionManager.SaveSession(ctx, sess)
+}
+
 

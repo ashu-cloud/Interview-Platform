@@ -510,7 +510,8 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 		}
 	}()
 
-	// 4. Initial Greeting on new or unstarted session (executed asynchronously so read loop is not blocked)
+	// 4. Initial Greeting on new or unstarted session
+	initialGreetingDone := make(chan struct{})
 	if len(sess.ConversationHistory) == 0 {
 		sess.TurnNumber = 1
 		curTurn.Store(1)
@@ -522,13 +523,17 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 		turnWg.Add(1)
 		go func() {
 			defer turnWg.Done()
+			defer close(initialGreetingDone)
 			turnCtx, turnCancel := tc.startTurn()
 			defer turnCancel()
 			defer tc.done()
 			if err := h.sendAITurn(turnCtx, send, sess, 1, buildSystemPrompt(&sess.Docket, initialHistory, "", "", ""), initialHistory); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("initial assessor turn failed", "interview_id", interviewID, "error", err)
+				sendError("INTERNAL_ERROR", "Internal server error")
 			}
 		}()
+	} else {
+		close(initialGreetingDone)
 	}
 
 	// Goroutine C — AI Response Generator
@@ -546,6 +551,18 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 				if text == "" {
 					turnWg.Done()
 					continue
+				}
+
+				// Sequence barrier: Ensure initial greeting finishes saving/publishing before participant turn 2
+				select {
+				case <-connDone:
+					turnWg.Done()
+					return
+				case <-initialGreetingDone:
+				}
+				if isFatalErr() {
+					turnWg.Done()
+					return
 				}
 
 				sess.TurnNumber++
@@ -845,6 +862,9 @@ func (h *WebSocketHandler) sendAITurn(ctx context.Context, send func(WSMessage),
 	var fullText strings.Builder
 	var sentenceBuf strings.Builder
 
+	var deliveredMu sync.Mutex
+	var deliveredText strings.Builder
+
 	sentenceChan := make(chan string, 32)
 	var ttsWg sync.WaitGroup
 	ttsWg.Add(1)
@@ -872,6 +892,13 @@ func (h *WebSocketHandler) sendAITurn(ctx context.Context, send func(WSMessage),
 				}
 				if len(audioBytes) > 0 && ctx.Err() == nil {
 					seq++
+					deliveredMu.Lock()
+					if deliveredText.Len() > 0 {
+						deliveredText.WriteString(" ")
+					}
+					deliveredText.WriteString(trimmed)
+					deliveredMu.Unlock()
+
 					send(WSMessage{
 						Type:     "ai_audio_chunk",
 						Turn:     turnNum,
@@ -895,12 +922,25 @@ func (h *WebSocketHandler) sendAITurn(ctx context.Context, send func(WSMessage),
 				Speaking: false,
 				Turn:     turnNum,
 			})
-			if fullText.Len() > 0 {
+
+			deliveredMu.Lock()
+			spoken := strings.TrimSpace(deliveredText.String())
+			deliveredMu.Unlock()
+
+			if spoken != "" {
 				sess.ConversationHistory = append(sess.ConversationHistory, model.Message{
 					Role:      "assessor",
-					Content:   fullText.String() + " [interrupted]",
+					Content:   spoken + " [interrupted]",
 					Timestamp: time.Now().UTC(),
 				})
+			} else if fullText.Len() > 0 {
+				sess.ConversationHistory = append(sess.ConversationHistory, model.Message{
+					Role:      "assessor",
+					Content:   "[interrupted before speech]",
+					Timestamp: time.Now().UTC(),
+				})
+			}
+			if len(sess.ConversationHistory) > 0 {
 				sess.LastActive = time.Now().UTC()
 				_ = h.sessMgr.SaveSession(context.Background(), sess)
 			}
