@@ -1,0 +1,60 @@
+import React from "react";
+
+interface OldLogoProps {
+  className?: string;
+  size?: number;
+}
+
+export default function OldLogo({ className = "w-10 h-10 sm:w-11 sm:h-11", size = 42 }: OldLogoProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 512 512"
+      width={size}
+      height={size}
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="Geometric Resonance Logo Mark"
+    >
+      {/* Outer Calibration Framing / Archival Crosshairs */}
+      <line x1="256" y1="20" x2="256" y2="48" stroke="currentColor" strokeWidth="6" strokeLinecap="round" />
+      <line x1="256" y1="464" x2="256" y2="492" stroke="currentColor" strokeWidth="6" strokeLinecap="round" />
+      <line x1="20" y1="256" x2="48" y2="256" stroke="currentColor" strokeWidth="6" strokeLinecap="round" />
+      <line x1="464" y1="256" x2="492" y2="256" stroke="currentColor" strokeWidth="6" strokeLinecap="round" />
+
+      {/* Outer Coordinate Ring with Hash Marks */}
+      <circle cx="256" cy="256" r="216" stroke="currentColor" strokeWidth="4" strokeDasharray="6 10" opacity="0.5" />
+      <circle cx="256" cy="256" r="184" stroke="currentColor" strokeWidth="5.5" opacity="0.9" />
+
+      {/* Acoustic Voice Waveform / Resonance Harmonics (Interlocking Geometric Arcs) */}
+      {/* Left Inbound Wave */}
+      <path d="M 140 256 A 116 116 0 0 1 256 140" stroke="currentColor" strokeWidth="12" strokeLinecap="round" />
+      <path d="M 172 256 A 84 84 0 0 1 256 172" stroke="currentColor" strokeWidth="9.5" strokeLinecap="round" />
+      <path d="M 204 256 A 52 52 0 0 1 256 204" stroke="currentColor" strokeWidth="7" strokeLinecap="round" />
+
+      {/* Right Outbound Wave */}
+      <path d="M 372 256 A 116 116 0 0 1 256 372" stroke="currentColor" strokeWidth="12" strokeLinecap="round" />
+      <path d="M 340 256 A 84 84 0 0 1 256 340" stroke="currentColor" strokeWidth="9.5" strokeLinecap="round" />
+      <path d="M 308 256 A 52 52 0 0 1 256 308" stroke="currentColor" strokeWidth="7" strokeLinecap="round" />
+
+      {/* Central Diamond Grounding Centroid Prism Core */}
+      <polygon points="256,196 316,256 256,316 196,256" fill="currentColor" />
+
+      {/* Precision Core Aperture */}
+      <circle cx="256" cy="256" r="16" fill="#FBF9F5" />
+      <circle cx="256" cy="256" r="7" fill="currentColor" />
+
+      {/* Satellite Calibration Vectors */}
+      <circle cx="256" cy="100" r="9" fill="currentColor" />
+      <circle cx="412" cy="256" r="9" fill="currentColor" />
+      <circle cx="256" cy="412" r="9" fill="currentColor" />
+      <circle cx="100" cy="256" r="9" fill="currentColor" />
+
+      {/* Diagonal Metric Beam Guides */}
+      <line x1="196" y1="196" x2="216" y2="216" stroke="currentColor" strokeWidth="4" strokeLinecap="round" opacity="0.7" />
+      <line x1="316" y1="296" x2="296" y2="316" stroke="currentColor" strokeWidth="4" strokeLinecap="round" opacity="0.7" />
+      <line x1="316" y1="216" x2="296" y2="196" stroke="currentColor" strokeWidth="4" strokeLinecap="round" opacity="0.7" />
+      <line x1="196" y1="316" x2="216" y2="296" stroke="currentColor" strokeWidth="4" strokeLinecap="round" opacity="0.7" />
+    </svg>
+  );
+}

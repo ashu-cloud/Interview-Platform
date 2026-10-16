@@ -1,0 +1,212 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #fbf9f5;
+  --color-paper-subtle: #f4f1ea;
+  --color-paper-card: #f8f5ee;
+  --color-paper-dark: #ede7db;
+  --color-sumi: #141413;
+  --color-sumi-secondary: #464542;
+  --color-sumi-muted: #78756e;
+  --color-hairline: #e5e2da;
+  --color-hairline-subtle: #eeeae1;
+  --color-vermilion: #d94326;
+  --color-amber-750: #b45309;
+  --color-emerald-500: #10b981;
+  --color-emerald-600: #059669;
+  --color-emerald-900: #064e3b;
+  --color-ultramarine: #1d4ed8;
+
+  --font-sans: var(--font-space-grotesk), system-ui, -apple-system, sans-serif;
+  --font-serif: var(--font-cormorant), Georgia, serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+
+  --shadow-plate: 0 1px 3px 0 rgba(20, 20, 19, 0.03), 0 1px 2px -1px rgba(20, 20, 19, 0.02);
+  --shadow-monograph: 0 24px 48px -12px rgba(20, 20, 19, 0.05), 0 8px 24px -6px rgba(20, 20, 19, 0.03);
+  --shadow-ink: 0 3px 0 0 #141413;
+}
+
+:root {
+  --background: #fbf9f5;
+  --foreground: #141413;
+}
+
+body {
+  background-color: #fbf9f5;
+  color: #141413;
+  font-family: var(--font-space-grotesk), system-ui, sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hide default operating system and pointer hand cursors across entire document */
+html,
+body,
+*,
+*::before,
+*::after {
+  cursor: none !important;
+}
+
+::selection {
+  background-color: #141413;
+  color: #fbf9f5;
+}
+
+.technical-grid {
+  background-size: 48px 48px;
+  background-image: 
+    linear-gradient(to right, rgba(20, 20, 19, 0.025) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 20, 19, 0.025) 1px, transparent 1px);
+}
+
+.plate-border {
+  border: 1px solid #e5e2da;
+}
+
+.hairline-r { border-right: 1px solid #e5e2da; }
+.hairline-b { border-bottom: 1px solid #e5e2da; }
+.hairline-t { border-top: 1px solid #e5e2da; }
+.hairline-l { border-left: 1px solid #e5e2da; }
+
+/* Museum Crosshair Marks with Hover Illumination */
+.crosshair-corner {
+  position: relative;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.crosshair-corner::before,
+.crosshair-corner::after {
+  position: absolute;
+  font-family: var(--font-jetbrains-mono), monospace;
+  font-size: 11px;
+  line-height: 1;
+  color: #a39f95;
+  pointer-events: none;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+.crosshair-corner::before {
+  content: "+";
+  top: -6px;
+  left: -5px;
+}
+.crosshair-corner::after {
+  content: "+";
+  bottom: -6px;
+  right: -5px;
+}
+.crosshair-corner:hover::before,
+.crosshair-corner:hover::after {
+  color: #141413;
+  text-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+/* Museum Seal Watermark with interactive sheen */
+.folio-stamp {
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-size: 9px;
+  font-family: var(--font-jetbrains-mono), monospace;
+  border: 1px solid #c7c2b6;
+  padding: 3px 7px;
+  color: #636059;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+.folio-stamp:hover {
+  border-color: #141413;
+  color: #141413;
+  background-color: #ffffff;
+}
+
+/* Tactile Card Elevation */
+.interactive-plate {
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease;
+}
+.interactive-plate:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 0 0 #141413;
+  border-color: #141413;
+}
+
+/* Pulse Animation */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.96); }
+}
+
+.live-pulse {
+  animation: pulse-subtle 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Scanline Animation */
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+.scan-active {
+  position: relative;
+  overflow: hidden;
+}
+
+.scan-active::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(5, 150, 105, 0.4), transparent);
+  animation: scanline 3.2s linear infinite;
+}
+
+/* Sound Ripple Waves */
+@keyframes sound-ripple {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+.ripple-ring-1 {
+  animation: sound-ripple 2.4s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+}
+.ripple-ring-2 {
+  animation: sound-ripple 2.4s cubic-bezier(0.1, 0.8, 0.3, 1) 0.8s infinite;
+}
+.ripple-ring-3 {
+  animation: sound-ripple 2.4s cubic-bezier(0.1, 0.8, 0.3, 1) 1.6s infinite;
+}
+
+/* Shimmer Progress Wave */
+@keyframes shimmer-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.shimmer-active {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer-active::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; bottom: 0; width: 50%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: shimmer-slide 1.8s infinite;
+}
+
+/* Packet Transit Along Flow Line */
+@keyframes packet-dash {
+  to {
+    stroke-dashoffset: -40;
+  }
+}
+.packet-flow-line {
+  stroke-dasharray: 6 4;
+  animation: packet-dash 1s linear infinite;
+}

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <!-- Exterior Archival Framing / Corner Marks -->
+  <path d="M 64 104 L 64 64 L 104 64" stroke="#141413" stroke-width="2" stroke-linecap="square"/>
+  <path d="M 448 104 L 448 64 L 408 64" stroke="#141413" stroke-width="2" stroke-linecap="square"/>
+  <path d="M 64 408 L 64 448 L 104 448" stroke="#141413" stroke-width="2" stroke-linecap="square"/>
+  <path d="M 448 408 L 448 448 L 408 448" stroke="#141413" stroke-width="2" stroke-linecap="square"/>
+
+  <!-- Subtle coordinate registration points -->
+  <line x1="256" y1="44" x2="256" y2="56" stroke="#141413" stroke-width="1.5"/>
+  <line x1="256" y1="456" x2="256" y2="468" stroke="#141413" stroke-width="1.5"/>
+  <line x1="44" y1="256" x2="56" y2="256" stroke="#141413" stroke-width="1.5"/>
+  <line x1="456" y1="256" x2="468" y2="256" stroke="#141413" stroke-width="1.5"/>
+
+  <!-- Outer Modular Container Grid (Rounded Square / Architectural Chassis) -->
+  <rect x="96" y="96" width="320" height="320" rx="36" fill="#141413"/>
+
+  <!-- Inner Negative-Space Modular Entity Geometry (Claude / Creeper / Agent Pixel Grid Matrix) -->
+  <!-- Unit grid: 320x320 with 8x8 blocks of 32px or composed bold geometric apertures -->
+  <!-- Forehead / Brow band negative space cutouts -->
+  <rect x="136" y="136" width="48" height="48" rx="8" fill="#FBF9F5"/>
+  <rect x="232" y="136" width="48" height="48" rx="8" fill="#FBF9F5"/>
+  <rect x="328" y="136" width="48" height="48" rx="8" fill="#FBF9F5"/>
+
+  <!-- Eyes: Characteristic Creeper/Claude Pixel Expression -->
+  <rect x="136" y="216" width="64" height="64" rx="10" fill="#FBF9F5"/>
+  <rect x="312" y="216" width="64" height="64" rx="10" fill="#FBF9F5"/>
+
+  <!-- Central Bridge / Muzzle / Vertical Node (Autonomous Agent Core) -->
+  <rect x="232" y="216" width="48" height="96" rx="8" fill="#FBF9F5"/>
+
+  <!-- Mouth / Lower Jaw (Inverted U / Creeper-style architectural notch) -->
+  <rect x="184" y="280" width="48" height="80" rx="8" fill="#FBF9F5"/>
+  <rect x="280" y="280" width="48" height="80" rx="8" fill="#FBF9F5"/>
+  <rect x="152" y="328" width="48" height="48" rx="8" fill="#FBF9F5"/>
+  <rect x="312" y="328" width="48" height="48" rx="8" fill="#FBF9F5"/>
+
+  <!-- High-precision micro-detailing: Pupil Apertures / Mathematical Core -->
+  <rect x="156" y="236" width="24" height="24" rx="4" fill="#141413"/>
+  <circle cx="344" cy="248" r="10" fill="#141413"/>
+  <circle cx="256" cy="248" r="6" fill="#141413"/>
+</svg>
