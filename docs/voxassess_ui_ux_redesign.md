@@ -34,40 +34,49 @@ A public marketing site can demonstrate the product, but it must not overshadow 
 7. Support empty/loading/error/permission-denied/expired-token/evaluation-failed states with recovery paths.
 8. Restore standard pointer and keyboard behavior; the current global cursor suppression should not carry over.
 
-## Art direction: “Editorial instrument”
+## Art direction: “Signal Room”
 
-Use a distinctive mix of warm paper, precise typography and restrained green. The existing monograph aesthetic has personality but currently foregrounds engineering exposition over day-to-day product use.
+The redesigned product should look materially different from the current warm-paper monograph UI. Do not preserve the ivory canvas, museum/archival metaphor, pale card grid, or current page composition. Keep the product's technical precision, but express it as a tactile, dark assessment instrument—not as a sci-fi control-room cliché.
 
 ### Palette
-- Canvas: warm ivory #F7F5EF
-- Main surface: #FFFEFA
-- Raised surface: #FFFFFF
-- Primary ink: #171916
-- Secondary ink: #5F655D
-- Hairline: #E4E3DA
-- Brand forest: #245C46
-- Brand moss: #88A88A
-- Pale mint: #EAF2E9
-- Attention amber: #B77928 / pale amber #F7EEDC
-- Error: muted brick #B94B42 / pale brick #F8E9E6
-- Dark candidate surface: #111714
-- Candidate accent: #9AD8B0
-Use color semantically, not decoratively. Green means active/ready/positive only where justified; amber means needs attention; brick means error.
+- App background: deep graphite-green #0D1210
+- Sidebar: near-black #090D0B
+- Primary surface: #141B17
+- Elevated surface: #19221C
+- Secondary surface: #202B23
+- Main text: soft white-green #EEF4EC
+- Secondary text: #9AA99B
+- Quiet metadata: #667568
+- Brand accent: signal lime #D5FA67
+- Accent background: #293719
+- Secondary information accent: cool blue #8AC7FF
+- Attention: amber #F1C06B
+- Error: soft coral #FF8F86
+- Candidate stage: deep forest-black with restrained green ambience
+Use lime sparingly for active navigation, important actions, live audio states, focused chart traces and evidence selection. It should not fill every icon or become a neon glow effect. Use blue for neutral technical telemetry, amber for attention, coral for errors.
 
 ### Typography
-- Primary UI: Space Grotesk or a similarly highly legible grotesk.
-- Editorial statements or report titles: Cormorant Garamond sparingly.
-- IDs, timestamps, event labels and technical measurements: JetBrains Mono sparingly.
-- Do not set all labels in uppercase. Use readable sentence case for real work.
-- Avoid ultra-small text; dense metadata should still meet comfortable readability.
+- Main UI: Space Grotesk or a similarly confident, highly legible grotesk.
+- Long-form report text: highly readable sans-serif at comfortable line height.
+- IDs, timing, transcript turn numbers, technical measurements and small status metadata: JetBrains Mono, sparingly.
+- Strong scale contrast: confident page titles, compact labels, readable body copy.
+- Avoid all-caps for every heading; use it only for small section markers and telemetry metadata.
 
-### Shape, spacing, motion
-- 1px subtle borders and restrained elevation.
-- Small-to-medium corner radii (8–14px) for product surfaces; avoid pill-shaped everything.
-- Generous page-level whitespace, compact dense tables where appropriate, consistent 4/8/12/16/24/32 spacing rhythm.
-- Motion 140–240ms for UI transitions; use deliberate progress animation only for real processes.
-- Do not use a custom cursor, fake telemetry, glowing neon, decorative grids everywhere, excessive gradients, gratuitous glassmorphism or generic AI sparkle motifs.
-- Responsive layout: persistent but collapsible sidebar on desktop; drawer/bottom navigation on small screens.
+### Shape, material, composition
+- Deep layered surfaces separated by precise 1px borders.
+- Medium-small radii (8–12px), not pill-shaped everything.
+- Strong typographic hierarchy and asymmetric compositions.
+- Data tables should feel like operational ledgers, not generic white spreadsheet tables.
+- Use a restrained audio waveform language and subtle animated signal traces where they explain state.
+- No blurred glass cards, giant gradient blobs, generic AI sparkle, excessive glow, floating decorative orbs, fake telemetry, permanent custom cursor, or grid wallpaper behind every screen.
+- The interface should feel engineered, tactile, precise and considered—with fewer, stronger elements instead of a screen filled with decoration.
+- Candidate experience should be immersive and darker than the manager workspace, but share the same signal-lime accent and typography.
+
+### Motion
+- UI transitions around 140–220ms.
+- Waveform animation must represent a demo/real audio state, not imply live audio where none exists.
+- Use clear state transitions for listening, speaking, interruption, reconnecting and completion.
+- Respect reduced motion; do not animate decorative elements without purpose.
 
 ## Shared application shell
 
