@@ -312,10 +312,12 @@ func (r *InviteRepository) GetInterviews(
 		`SELECT i.id, i.status, i.started_at, i.completed_at, i.created_at,
 		        c.id, c.full_name, c.email,
 		        d.id, d.title,
+		        er.id::text, er.overall_score, er.recommendation,
 		        COUNT(*) OVER() AS total
 		 FROM assessment_sessions i
 		 JOIN participants c ON c.id = i.candidate_id
 		 JOIN assessment_blueprints d ON d.id = i.docket_id
+		 LEFT JOIN evaluation_reports er ON er.interview_id = i.id
 		 WHERE i.org_id = $1
 		   AND ($2 = '' OR i.status = $2)
 		   AND ($3::uuid IS NULL OR d.job_role_id = $3::uuid)
@@ -332,13 +334,24 @@ func (r *InviteRepository) GetInterviews(
 	var total int64
 	for rows.Next() {
 		var d model.InterviewDetail
+		var fbID *string
+		var fbScore *float64
+		var fbRec *string
 		if err := rows.Scan(
 			&d.ID, &d.Status, &d.StartedAt, &d.CompletedAt, nil,
 			&d.Candidate.ID, &d.Candidate.FullName, &d.Candidate.Email,
 			&d.Docket.ID, &d.Docket.Title,
+			&fbID, &fbScore, &fbRec,
 			&total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("InviteRepository.GetInterviews: scan: %w", err)
+		}
+		if fbID != nil && fbScore != nil && fbRec != nil {
+			d.Feedback = &model.FeedbackBrief{
+				ID:             *fbID,
+				OverallScore:   *fbScore,
+				Recommendation: *fbRec,
+			}
 		}
 		interviews = append(interviews, d)
 	}
@@ -378,6 +391,18 @@ func (r *InviteRepository) GetInterviewByID(
 		}
 		return nil, fmt.Errorf("InviteRepository.GetInterviewByID: %w", err)
 	}
+
+	if d.Status == "feedback_ready" || d.Status == "evaluation_ready" || d.Status == "completed" {
+		var fb model.FeedbackBrief
+		fbErr := r.db.QueryRow(ctx,
+			`SELECT id::text, overall_score, recommendation FROM evaluation_reports WHERE interview_id = $1`,
+			interviewID,
+		).Scan(&fb.ID, &fb.OverallScore, &fb.Recommendation)
+		if fbErr == nil {
+			d.Feedback = &fb
+		}
+	}
+
 	return d, nil
 }
 
@@ -573,4 +598,138 @@ func (r *InviteRepository) EnqueueEvaluation(
 		return nil, fmt.Errorf("InviteRepository.EnqueueEvaluation: commit: %w", err)
 	}
 	return job, nil
+}
+
+// GetPublicTrack retrieves track details and the first blueprint for unauthenticated applicants.
+func (r *InviteRepository) GetPublicTrack(ctx context.Context, jobID uuid.UUID) (*model.PublicTrackResponse, error) {
+	resp := &model.PublicTrackResponse{}
+	err := r.db.QueryRow(ctx,
+		`SELECT id, org_id, created_by, title, description,
+		        COALESCE(required_skills, ARRAY[]::text[]),
+		        status, created_at, updated_at
+		 FROM assessment_tracks
+		 WHERE id = $1`,
+		jobID,
+	).Scan(
+		&resp.Track.ID, &resp.Track.OrgID, &resp.Track.CreatedBy, &resp.Track.Title, &resp.Track.Description,
+		&resp.Track.RequiredSkills, &resp.Track.Status, &resp.Track.CreatedAt, &resp.Track.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("InviteRepository.GetPublicTrack: %w", apperror.ErrNotFound)
+		}
+		return nil, fmt.Errorf("InviteRepository.GetPublicTrack: query track: %w", err)
+	}
+
+	// Fetch active blueprint if available
+	var bpID uuid.UUID
+	var bpTitle string
+	var bpDuration int
+	bpErr := r.db.QueryRow(ctx,
+		`SELECT id, title, duration_mins
+		 FROM assessment_blueprints
+		 WHERE job_role_id = $1
+		 ORDER BY created_at ASC
+		 LIMIT 1`,
+		jobID,
+	).Scan(&bpID, &bpTitle, &bpDuration)
+	if bpErr == nil {
+		resp.BlueprintID = bpID.String()
+		resp.BlueprintTitle = bpTitle
+		resp.DurationMins = bpDuration
+	}
+
+	return resp, nil
+}
+
+// PublicApply finds or creates a participant for the track and generates an invite + interview.
+func (r *InviteRepository) PublicApply(
+	ctx context.Context,
+	jobID uuid.UUID,
+	req *model.PublicApplyRequest,
+	token string,
+	expiresAt time.Time,
+) (*model.InterviewInvite, *model.Interview, uuid.UUID, uuid.UUID, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Verify track
+	var orgID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT org_id FROM assessment_tracks WHERE id = $1`, jobID).Scan(&orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: track %w", apperror.ErrNotFound)
+		}
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: query track: %w", err)
+	}
+
+	// 2. Find blueprint
+	var blueprintID uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM assessment_blueprints WHERE job_role_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		jobID,
+	).Scan(&blueprintID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: track has no active blueprint: %w", apperror.ErrConflict)
+		}
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: query blueprint: %w", err)
+	}
+
+	// 3. Find or create participant
+	var participantID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM participants WHERE job_role_id = $1 AND email = $2`,
+		jobID, req.Email,
+	).Scan(&participantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx,
+			`INSERT INTO participants (org_id, job_role_id, full_name, email)
+			 VALUES ($1, $2, $3, $4)
+			 RETURNING id`,
+			orgID, jobID, req.FullName, req.Email,
+		).Scan(&participantID)
+		if err != nil {
+			return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: insert participant: %w", err)
+		}
+	} else if err != nil {
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: find participant: %w", err)
+	}
+
+	// 4. Create invite
+	invite := &model.InterviewInvite{}
+	err = tx.QueryRow(ctx,
+		`INSERT INTO participant_invites (candidate_id, docket_id, org_id, token, expires_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, candidate_id, docket_id, org_id, token, expires_at, used_at, created_at`,
+		participantID, blueprintID, orgID, token, expiresAt,
+	).Scan(
+		&invite.ID, &invite.CandidateID, &invite.DocketID, &invite.OrgID,
+		&invite.Token, &invite.ExpiresAt, &invite.UsedAt, &invite.CreatedAt,
+	)
+	if err != nil {
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: insert invite: %w", err)
+	}
+
+	// 5. Create interview
+	interview := &model.Interview{}
+	err = tx.QueryRow(ctx,
+		`INSERT INTO interview_sessions (invite_id, candidate_id, docket_id, org_id, status)
+		 VALUES ($1, $2, $3, $4, 'invited')
+		 RETURNING id, invite_id, candidate_id, docket_id, org_id, status, created_at, updated_at`,
+		invite.ID, participantID, blueprintID, orgID,
+	).Scan(
+		&interview.ID, &interview.InviteID, &interview.CandidateID, &interview.DocketID,
+		&interview.OrgID, &interview.Status, &interview.CreatedAt, &interview.UpdatedAt,
+	)
+	if err != nil {
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: insert interview: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, uuid.Nil, uuid.Nil, fmt.Errorf("InviteRepository.PublicApply: commit: %w", err)
+	}
+
+	return invite, interview, orgID, participantID, nil
 }

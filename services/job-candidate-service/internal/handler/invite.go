@@ -239,3 +239,45 @@ func (h *InviteHandler) MarkInviteUsed(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "ok"})
 }
+
+// GetPublicTrack handles GET /api/v1/public/tracks/:job_id (unauthenticated).
+func (h *InviteHandler) GetPublicTrack(c *gin.Context) {
+	jobID, err := uuid.Parse(c.Param("job_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+
+	resp, err := h.svc.GetPublicTrack(c.Request.Context(), jobID)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// PublicApply handles POST /api/v1/public/tracks/:job_id/apply (unauthenticated).
+func (h *InviteHandler) PublicApply(c *gin.Context) {
+	jobID, err := uuid.Parse(c.Param("job_id"))
+	if err != nil {
+		RespondError(c, apperror.ErrBadRequest)
+		return
+	}
+
+	var req model.PublicApplyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		RespondValidationError(c, err)
+		return
+	}
+	if err := h.validate.Struct(req); err != nil {
+		RespondValidationError(c, err)
+		return
+	}
+
+	resp, err := h.svc.PublicApply(c.Request.Context(), jobID, &req)
+	if err != nil {
+		RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, resp)
+}

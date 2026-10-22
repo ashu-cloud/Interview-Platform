@@ -47,8 +47,8 @@ func main() {
 		llmClient = llm.NewMockEvaluationLLMClient()
 		logger.Info("using mock evaluation LLM")
 	} else {
-		llmClient = llm.NewGroqEvaluationLLMClient(cfg.GroqAPIKey)
-		logger.Info("using Groq evaluation LLM", "model", "llama-3.3-70b-versatile")
+		llmClient = llm.NewGroqEvaluationLLMClient(cfg.GroqAPIKey, cfg.GroqModel)
+		logger.Info("using Groq evaluation LLM", "model", cfg.GroqModel)
 	}
 
 	evaluator := worker.NewEvaluator(llmClient, logger)

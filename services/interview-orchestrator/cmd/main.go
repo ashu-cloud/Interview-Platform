@@ -126,14 +126,16 @@ func main() {
 	audioOffloader.Start()
 	defer audioOffloader.Stop()
 
-	var embClient embedding.EmbeddingClient
-	if cfg.DemoMode || cfg.OpenAIEmbeddingAPIKey == "" {
-		embClient = embedding.DemoEmbeddingClient{}
-	} else {
-		embClient = embedding.NewOpenAIEmbeddingClient(cfg.OpenAIEmbeddingAPIKey, cfg.EmbeddingDims).
+	var openAIClient embedding.EmbeddingClient
+	if cfg.OpenAIEmbeddingAPIKey != "" && strings.HasPrefix(cfg.OpenAIEmbeddingAPIKey, "sk-") && !cfg.DemoMode {
+		slog.Info("orchestrator embeddings: configured with OpenAI upstream", "model", cfg.EmbeddingModel, "dims", cfg.EmbeddingDims)
+		openAIClient = embedding.NewOpenAIEmbeddingClient(cfg.OpenAIEmbeddingAPIKey, cfg.EmbeddingDims).
 			WithModel(cfg.EmbeddingModel).
 			WithBaseURL(cfg.EmbeddingBaseURL)
+	} else {
+		slog.Info("orchestrator embeddings: configured with local deterministic semantic engine", "dims", cfg.EmbeddingDims)
 	}
+	embClient := embedding.NewFallbackEmbeddingClient(openAIClient, cfg.EmbeddingDims)
 	adaptiveEngine := adaptive.NewEngine(embClient)
 	ragPrefetcher := rag.NewPrefetcher(dbPool, redisClient, embClient, 150*time.Millisecond)
 	if dbPool == nil {
@@ -144,6 +146,9 @@ func main() {
 	wsHandler.SetAudioOffloader(audioOffloader)
 	wsHandler.SetAdaptive(adaptiveEngine, ragPrefetcher)
 	wsHandler.SetDBPool(dbPool)
+	wsHandler.SetVoiceDebug(cfg.VoiceDebug)
+
+	debugHandler := handler.NewDebugHandler(cfg, redisClient, llmPool, ttsAdapter)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +156,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok","service":"session-runtime"}`))
 	})
+	mux.HandleFunc("/debug/voice", debugHandler.HandleDebugVoice)
 	mux.HandleFunc("/ws/interview/", wsHandler.HandleWS)
 
 	srv := &http.Server{

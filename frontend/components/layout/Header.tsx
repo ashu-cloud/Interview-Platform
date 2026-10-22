@@ -1,8 +1,17 @@
-import React from "react";
+"use client";
+
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import Logo from "@/components/ui/Logo";
+import { api } from "@/lib/api";
 
 export default function Header() {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  useEffect(() => {
+    setIsLoggedIn(api.isAuthenticated());
+  }, []);
+
   return (
     <header className="sticky top-0 z-50 bg-[#fbf9f5]/90 backdrop-blur-md hairline-b" data-purpose="navigation-header">
       {/* Main Navigation Bar with intentional air */}
@@ -50,15 +59,29 @@ export default function Header() {
             </svg>
             <span>GitHub</span>
           </a>
-          <Link
-            className="inline-flex items-center gap-2 text-xs font-mono font-medium px-4 py-2 rounded-xs bg-sumi text-paper hover:bg-neutral-800 transition-colors shadow-sm"
-            href="/auth"
-          >
-            <span>Login</span>
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </Link>
+
+          {isLoggedIn ? (
+            <Link
+              className="inline-flex items-center gap-2 text-xs font-mono font-medium px-4 py-2 rounded-xs bg-sumi text-paper hover:bg-neutral-800 transition-colors shadow-sm"
+              href="/console"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Console</span>
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </Link>
+          ) : (
+            <Link
+              className="inline-flex items-center gap-2 text-xs font-mono font-medium px-4 py-2 rounded-xs bg-sumi text-paper hover:bg-neutral-800 transition-colors shadow-sm"
+              href="/auth"
+            >
+              <span>Login</span>
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </Link>
+          )}
         </div>
       </div>
     </header>

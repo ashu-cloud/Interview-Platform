@@ -3,7 +3,7 @@ WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download || true
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o service ./cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o service ./cmd
 
 FROM scratch
 COPY --from=builder /app/service /service

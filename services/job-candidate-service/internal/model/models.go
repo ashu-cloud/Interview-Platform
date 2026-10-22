@@ -285,6 +285,20 @@ type InviteResponse struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
+// PublicApplyRequest is the request body for POST /api/v1/public/tracks/:job_id/apply.
+type PublicApplyRequest struct {
+	FullName string `json:"full_name" validate:"required,min=2,max=100"`
+	Email    string `json:"email"     validate:"required,email"`
+}
+
+// PublicTrackResponse is the response payload for GET /api/v1/public/tracks/:job_id.
+type PublicTrackResponse struct {
+	Track          JobRole `json:"track"`
+	BlueprintID    string  `json:"blueprint_id,omitempty"`
+	BlueprintTitle string  `json:"blueprint_title,omitempty"`
+	DurationMins   int     `json:"duration_mins,omitempty"`
+}
+
 // InviteValidateCandidate is the nested candidate info in InviteValidateResponse.
 type InviteValidateCandidate struct {
 	ID       string `json:"id"`

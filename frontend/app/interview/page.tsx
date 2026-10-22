@@ -1,14 +1,20 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Logo from "@/components/ui/Logo";
+import { api } from "@/lib/api";
 
 export default function InterviewAccessPage() {
   const router = useRouter();
   const [tokenInput, setTokenInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  useEffect(() => {
+    setIsLoggedIn(api.isAuthenticated());
+  }, []);
 
   const handleJoin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,10 +46,11 @@ export default function InterviewAccessPage() {
           </span>
         </Link>
         <Link
-          href="/auth"
-          className="text-xs font-mono text-sumi-secondary hover:text-sumi transition-colors"
+          href={isLoggedIn ? "/console" : "/auth"}
+          className="text-xs font-mono text-sumi-secondary hover:text-sumi transition-colors flex items-center gap-1.5"
         >
-          Hiring Team Console →
+          {isLoggedIn && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+          <span>{isLoggedIn ? "Open Console →" : "Hiring Team Console →"}</span>
         </Link>
       </header>
 

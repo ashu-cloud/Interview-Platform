@@ -6,44 +6,93 @@ This document specifies the HTTP REST API and WebSocket protocols for the Assess
 
 ## Authentication & Authorization
 
-The system uses two authentication mechanisms:
+The system uses three access tiers:
 
-1. **Bearer JWT** (Assessment Authors / Users):
+1. **Bearer JWT** (Assessment Authors / Hiring Managers):
    - Header: `Authorization: Bearer <jwt_token>`
    - Acquired via `/api/v1/auth/login` or `/api/v1/auth/register`.
    - Used for all authoring, participant management, and session querying endpoints.
 
-2. **Internal API Key** (Service-to-Service):
+2. **Public / Unauthenticated Access** (Candidates):
+   - Public endpoints allow candidates to self-apply, inspect track criteria, and validate invite tokens without a manager account.
+   - Used at `/api/v1/public/*` and `/api/v1/invites/validate/:token`.
+
+3. **Internal API Key** (Service-to-Service):
    - Header: `X-Internal-Key: <internal_key>`
-   - Used by `session-runtime` (`interview-orchestrator`) and background workers for internal synchronization.
+   - Used by `interview-orchestrator` and background workers for internal synchronization and diagnostics.
 
 ---
 
 ## Canonical API Routes (v1)
 
-### Assessment Tracks
-Tracks represent job roles and competency definitions.
+### Public Candidate Portal (Unauthenticated)
 
-- `POST /api/v1/tracks`
-  - Body: `{"title": string, "description": string, "required_skills": string[]}`
-  - Response: `201 Created` — Track object
-- `GET /api/v1/tracks`
-  - Query: `?status=active|archived&page=1&limit=20`
-  - Response: `200 OK` — `{"tracks": [...], "total": int, "page": int, "limit": int}`
-- `GET /api/v1/tracks/:track_id`
-  - Response: `200 OK` — Track object
-- `PATCH /api/v1/tracks/:track_id`
-  - Body: `{"title"?: string, "description"?: string, "required_skills"?: string[], "status"?: string}`
-  - Response: `200 OK` — Updated Track object
-- `DELETE /api/v1/tracks/:track_id`
-  - Response: `204 No Content` (Returns `409 Conflict` if active blueprints or participants depend on it)
+- `GET /api/v1/public/tracks/:job_id`
+  - Fetches public track overview and first active blueprint metadata for prospective applicants.
+  - Response: `200 OK`
+    ```json
+    {
+      "track": {
+        "id": "uuid",
+        "title": "Senior Distributed Systems Engineer",
+        "description": "Design resilient distributed architectures...",
+        "required_skills": ["Go", "Distributed Systems", "Raft"]
+      },
+      "blueprint_id": "uuid",
+      "blueprint_title": "Core Systems & Consensus Blueprint",
+      "duration_mins": 30
+    }
+    ```
+
+- `POST /api/v1/public/tracks/:job_id/apply`
+  - Allows candidates to self-apply. Automatically finds or creates a participant record, attaches the active blueprint, initializes an interview session, caches the invite token in Redis (TTL: 7 days), and returns an invite token.
+  - Body:
+    ```json
+    {
+      "full_name": "Jane Doe",
+      "email": "jane.doe@example.com"
+    }
+    ```
+  - Response: `201 Created`
+    ```json
+    {
+      "invite_id": "uuid",
+      "invite_link": "http://localhost:3000/interview/token_xyz",
+      "token": "token_xyz",
+      "expires_at": "2026-10-27T12:00:00Z"
+    }
+    ```
+
+- `GET /api/v1/invites/validate/:token`
+  - Validates candidate invite token prior to opening the real-time WebSocket stage.
+  - Response: `200 OK`
+    ```json
+    {
+      "valid": true,
+      "candidate": { "id": "uuid", "full_name": "Jane Doe" },
+      "track": { "id": "uuid", "title": "Senior Distributed Systems Engineer" },
+      "blueprint_title": "Core Systems & Consensus Blueprint",
+      "duration_mins": 30,
+      "expires_at": "2026-10-27T12:00:00Z"
+    }
+    ```
 
 ---
 
-### Assessment Blueprints
-Blueprints contain the question prompts and evaluation rubrics for an assessment.
+### Assessment Tracks (Authenticated)
+
+- `POST /api/v1/tracks`: Create assessment track.
+- `GET /api/v1/tracks`: List tracks for organization (`?status=active|archived&page=1&limit=20`).
+- `GET /api/v1/tracks/:track_id`: Get track details by ID.
+- `PATCH /api/v1/tracks/:track_id`: Partial update of track.
+- `DELETE /api/v1/tracks/:track_id`: Delete track (returns `409 Conflict` if active blueprints or candidates depend on it).
+
+---
+
+### Assessment Blueprints (Authenticated)
 
 - `POST /api/v1/tracks/:track_id/blueprints`
+  - Creates blueprint with nested questions and rubric criteria. Generates vector embeddings for criteria asynchronously.
   - Body:
     ```json
     {
@@ -68,101 +117,81 @@ Blueprints contain the question prompts and evaluation rubrics for an assessment
       ]
     }
     ```
-  - Response: `201 Created` — Blueprint object with nested prompts and rubric criteria.
-- `GET /api/v1/tracks/:track_id/blueprints`
-  - Response: `200 OK` — `{"blueprints": [...]}`
-- `GET /api/v1/blueprints/:blueprint_id`
-  - Response: `200 OK` — Blueprint object
-- `PATCH /api/v1/blueprints/:blueprint_id`
-  - Body: `{"title"?: string, "instructions"?: string, "duration_mins"?: int}`
-  - Response: `200 OK` — Updated Blueprint object
-- `DELETE /api/v1/blueprints/:blueprint_id`
-  - Response: `204 No Content` (Returns `409 Conflict` if referenced by active invites)
+- `GET /api/v1/tracks/:track_id/blueprints`: List blueprints for track.
+- `GET /api/v1/blueprints/:blueprint_id`: Fetch blueprint details with prompts and rubric.
+- `PATCH /api/v1/blueprints/:blueprint_id`: Update blueprint.
+- `DELETE /api/v1/blueprints/:blueprint_id`: Delete blueprint.
 
 ---
 
-### Participants & Assessment Links (Invites)
+### Participants & Invites (Authenticated)
 
-- `POST /api/v1/tracks/:track_id/participants`
-  - Body: `{"email": string, "full_name": string}`
-  - Response: `201 Created` — Participant object
-- `GET /api/v1/tracks/:track_id/participants`
-  - Response: `200 OK` — `{"participants": [{"id": ..., "full_name": ..., "email": ..., "interview_status": ...}]}`
-- `GET /api/v1/participants/:participant_id`
-  - Response: `200 OK` — Participant object
-- `POST /api/v1/participants/:participant_id/invite`
-  - Body: `{"docket_id": string, "expires_in_days": int}`
-  - Response: `201 Created` — `{"invite_id": string, "invite_link": string, "token": string, "expires_at": string}`
-- `GET /api/v1/invites/validate/:token` (Public / unauthenticated)
-  - Validates token for participant entering assessment stage.
-  - Response: `200 OK` — `{"valid": bool, "participant": {...}, "track": {...}, "blueprint_title": string, "expires_at": string}`
+- `POST /api/v1/tracks/:track_id/participants`: Add participant record manually.
+- `GET /api/v1/tracks/:track_id/participants`: List participants and their interview statuses.
+- `GET /api/v1/participants/:participant_id`: Fetch participant details.
+- `POST /api/v1/participants/:participant_id/invite`: Generate single-use invite token.
 
 ---
 
-### Assessment Sessions
+### Assessment Sessions & Dossiers (Authenticated)
 
-- `POST /api/v1/sessions`
-  - Body: `{"invite_id": string}`
-  - Response: `201 Created` (Idempotent: returns existing session if already initialized).
-- `GET /api/v1/sessions`
-  - Query: `?status=invited|in_progress|completed|feedback_ready&job_id=&page=1&limit=20`
-  - Response: `200 OK` — `{"sessions": [...], "total": int}`
-- `GET /api/v1/sessions/:session_id`
-  - Response: `200 OK` — Detailed session object (status, participant info, blueprint title, timestamps, evaluation brief).
-- `GET /api/v1/sessions/:session_id/turns`
-  - Response: `200 OK` — `{"turns": [{"turn_number": int, "role": string, "content": string, "created_at": string}]}`
-- `POST /api/v1/sessions/:session_id/evaluation`
-  - Triggers asynchronous evaluation report generation (enqueues `outbox_completed` event).
-  - Response: `202 Accepted` — `{"id": string, "session_id": string, "turn_count": int, "status": "pending"}`
-- `GET /api/v1/sessions/:session_id/evaluation`
-  - Response: `200 OK` — Scored report, overall recommendation, rubric breakdown, and evidence transcript.
+- `POST /api/v1/sessions`: Initialize or resume an assessment session (`{"invite_id": string}`).
+- `GET /api/v1/sessions`: List sessions across organization (`?status=invited|in_progress|completed|feedback_ready&page=1&limit=20`).
+- `GET /api/v1/sessions/:session_id`: Fetch session details, candidate information, and score summaries.
+- `GET /api/v1/sessions/:session_id/turns`: List audited conversation turns from `session_turns`.
+- `POST /api/v1/sessions/:session_id/evaluation`: Trigger or retry asynchronous evaluation generation (`202 Accepted`).
+- `GET /api/v1/sessions/:session_id/evaluation`: Retrieve scored evaluation report, executive summary, and verbatim cited evidence quotes.
 
 ---
 
-## Backward-Compatibility Route Aliases
+### Diagnostics & Observability
 
-For seamless interoperability during migration, the following legacy paths remain supported:
-
-| Legacy Route | Handled As | Status |
-|---|---|---|
-| `GET, POST /api/v1/jobs` | `/api/v1/tracks` | Supported (returns `jobs` envelope on GET) |
-| `GET, PATCH /api/v1/jobs/:job_id` | `/api/v1/tracks/:track_id` | Supported |
-| `GET, POST /api/v1/jobs/:job_id/dockets` | `/api/v1/tracks/:track_id/blueprints` | Supported (returns `dockets` envelope on GET) |
-| `GET /api/v1/dockets/:docket_id` | `/api/v1/blueprints/:blueprint_id` | Supported |
-| `GET, POST /api/v1/jobs/:job_id/candidates` | `/api/v1/tracks/:track_id/participants` | Supported (returns `candidates` envelope on GET) |
-| `GET /api/v1/candidates/:candidate_id` | `/api/v1/participants/:participant_id` | Supported |
-| `POST /api/v1/candidates/:candidate_id/invite` | `/api/v1/participants/:participant_id/invite` | Supported |
-| `GET /api/v1/interviews` | `/api/v1/sessions` | Supported (returns `interviews` envelope on GET) |
-| `GET /api/v1/interviews/:interview_id` | `/api/v1/sessions/:session_id` | Supported |
-| `GET /api/v1/interviews/:interview_id/feedback` | `/api/v1/sessions/:session_id/evaluation` | Supported |
-| `PATCH /api/v1/interviews/:interview_id/status` | `/internal/sessions/:session_id/status` | Supported (X-Internal-Key) |
-| `PATCH /api/v1/invites/:invite_id/use` | Marks invite used | Supported (X-Internal-Key) |
+- `GET /debug/voice` (interview-orchestrator on `:8004` / `:8002`)
+  - Gated by `VOICE_DEBUG=true` or `X-Internal-Key`.
+  - Probes live upstream dependencies:
+    - **Redis**: PING latency test.
+    - **Platform API**: Checks connectivity to `job-candidate-service`.
+    - **Deepgram STT**: Probes Deepgram WebSocket handshaking.
+    - **Groq LLM**: Probes minimal streaming generation latency.
+    - **ElevenLabs TTS**: Probes audio synthesis chunk delivery.
+  - Response:
+    ```json
+    {
+      "status": "healthy",
+      "timestamp": "2026-10-20T16:00:00Z",
+      "checks": {
+        "redis": { "status": "ok", "latency_ms": 1.2 },
+        "platform_api": { "status": "ok", "latency_ms": 4.5 },
+        "deepgram_stt": { "status": "ok" },
+        "groq_llm": { "status": "ok", "model": "openai/gpt-oss-120b" },
+        "elevenlabs_tts": { "status": "ok", "voice_id": "21m00Tcm4TlvDq8ikWAM" }
+      }
+    }
+    ```
 
 ---
 
 ## Real-Time WebSocket Protocol
 
-- **Endpoint**: `/ws/interview/?token=<invite-token>` (handled by `session-runtime`)
+- **Endpoint**: `/ws/interview/?token=<invite-token>` (handled by `interview-orchestrator` on `:8004` / `:8002`)
 
-### Client → Server Messages
+### Binary Protocol Tags
+All binary WebSocket frames are prefixed with a 1-byte opcode tag:
+- **`0x01` (Client -> Server)**: Raw Linear PCM audio chunk (16kHz, 16-bit mono Little Endian).
+- **`0x02` (Server -> Client)**: Synthesized MP3 audio chunk (24kHz) for immediate client playback.
 
-- `speech_started`: Participant begins speaking.
-- `speech_ended`: Participant stops speaking.
-- `audio_frame`: Base64 binary chunk of real-time audio.
-- `audio_end`: Finalized turn audio frame blob.
-- `heartbeat`: Ping message sent every 10 seconds to maintain connection.
-- `end_assessment`: Participant requests to finalize session. (Legacy `end_interview` is also supported).
+### Control Frames (JSON Text)
 
-### Server → Client Messages
+#### Client → Server Messages:
+- `{"type": "client_ready"}`: Client signals audio context is active and ready for interview greeting.
+- `{"type": "interrupt"}`: Client signals local speech detection, halting assessor playback.
+- `{"type": "end_assessment"}`: Client requests graceful completion of assessment session.
+- `{"type": "ping"}`: Heartbeat frame sent every 10 seconds.
 
-- `connected`: Session connected and initialized.
-- `ai_text_chunk`: Streamed token of the assessor's response.
-- `ai_text_end`: Completed text turn of the assessor.
-- `ai_audio_chunk`: Synthesized binary audio chunk (ElevenLabs streaming).
-- `ai_audio_end`: Completed audio playback chunk for current turn.
-- `ai_interrupted`: Sent if the participant interrupts the assessor during TTS playback.
-- `interim_transcript`: Real-time streaming transcription from STT.
-- `final_transcript`: Completed transcription turn.
-- `assessment_complete`: Session concluded and marked completed. (Legacy `interview_complete` is also supported).
-- `heartbeat_ack`: Acknowledgement of client heartbeat.
-- `error`: Error payload `{"type": "error", "message": string}`.
+#### Server → Client Messages:
+- `{"type": "connected", "session_id": "...", "has_history": bool}`: Connection established. `has_history: true` signals a reconnected session with existing conversation history.
+- `{"type": "transcript", "role": "participant"|"agent", "content": "..."}`: Verbatim transcribed utterance.
+- `{"type": "interim_transcript", "content": "..."}`: Real-time interim speech hypothesis.
+- `{"type": "ai_interrupted", "turn": int}`: Signals server has cancelled in-flight response and synchronized atomic turn counter.
+- `{"type": "assessment_complete"}`: Assessment concluded and marked `completed` in outbox ledger.
+- `{"type": "error", "message": string}`: Error payload.

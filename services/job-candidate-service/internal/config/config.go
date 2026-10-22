@@ -36,10 +36,15 @@ func Load() (*Config, error) {
 		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
 		AppDomain:      getEnv("APP_DOMAIN", "http://localhost:3000"),
 
-		OpenAIEmbeddingAPIKey: strings.TrimSpace(os.Getenv("OPENAI_EMBEDDING_API_KEY")),
-		EmbeddingModel:        getEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
-		EmbeddingBaseURL:      strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
-		DemoMode:              strings.EqualFold(os.Getenv("ASSESSMENT_DEMO_MODE"), "true") || strings.EqualFold(os.Getenv("INTERVIEW_DEMO_MODE"), "true"),
+		OpenAIEmbeddingAPIKey: strings.TrimSpace(func() string {
+			if k := os.Getenv("EMBEDDING_API_KEY"); strings.TrimSpace(k) != "" {
+				return k
+			}
+			return os.Getenv("OPENAI_EMBEDDING_API_KEY")
+		}()),
+		EmbeddingModel:   getEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
+		EmbeddingBaseURL: strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
+		DemoMode:         strings.EqualFold(os.Getenv("ASSESSMENT_DEMO_MODE"), "true") || strings.EqualFold(os.Getenv("INTERVIEW_DEMO_MODE"), "true"),
 	}
 
 	cfg.EmbeddingDims = 768

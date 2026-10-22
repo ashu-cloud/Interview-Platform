@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -92,7 +93,7 @@ type deepgramStreamingSession struct {
 }
 
 func (a *deepgramAdapter) StreamingSession(ctx context.Context) (StreamingSession, error) {
-	url := "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true&interim_results=true&endpointing=350&utterance_end_ms=700&vad_events=true&encoding=linear16&sample_rate=16000&channels=1"
+	url := "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true&interim_results=true&endpointing=1500&vad_events=true&encoding=linear16&sample_rate=16000&channels=1"
 	headers := http.Header{}
 	headers.Set("Authorization", "Token "+a.apiKey)
 
@@ -143,12 +144,21 @@ func (s *deepgramStreamingSession) readLoop() {
 		default:
 			_, data, err := s.conn.ReadMessage()
 			if err != nil {
+				select {
+				case <-s.done:
+				default:
+					slog.Error("deepgram streaming connection read error", "error", err)
+				}
 				return
 			}
 
 			var msg deepgramStreamMessage
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
+			}
+
+			if msg.Type == "Error" {
+				slog.Error("deepgram streaming error payload", "payload", string(data))
 			}
 
 			if len(msg.Channel.Alternatives) > 0 {

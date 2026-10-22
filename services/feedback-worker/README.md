@@ -1,13 +1,13 @@
 # Feedback Worker (`evaluation-worker`)
 
-The `feedback-worker` is the asynchronous grading microservice of VoxAssess. It consumes interview completion events from Kafka or the PostgreSQL Outbox, fetches the candidate transcript, validates completeness, evaluates responses concurrently against the rubric, validates evidence quotes against verbatim utterances, and stores structured evaluation reports.
+The `feedback-worker` is the asynchronous grading microservice of VoxAssess. It consumes interview completion events from the PostgreSQL Outbox (`outbox_completed`), fetches the candidate transcript, validates completeness, evaluates responses concurrently against the rubric, validates evidence quotes against verbatim utterances, and stores structured evaluation reports.
 
 ---
 
 ## Architectural Workflow
 
 ```
-Kafka: interview.completed / Postgres: outbox_completed
+Postgres Outbox: outbox_completed (FOR UPDATE SKIP LOCKED)
         │
         ▼
 +───────────────────────────────────────────────────────────────────────+
@@ -19,7 +19,7 @@ Kafka: interview.completed / Postgres: outbox_completed
 |                                                                       |
 | 2. Bounded-Concurrent Scatter-Gather: EvaluateTranscript()            |
 |    ├── Spawns worker pool bounded to N=5 concurrent goroutines        |
-|    ├── Evaluates each rubric criterion independently via LLM          |
+|    ├── Evaluates each rubric criterion independently via Groq LLM     |
 |    └── Reduces turnaround from 502.2ms to 100.4ms (5.0x speedup)      |
 |                                                                       |
 | 3. Schema Parsing & Deterministic Regex Repair                        |
@@ -36,15 +36,17 @@ Kafka: interview.completed / Postgres: outbox_completed
 |    ├── Flags evaluation_failed on LLM errors (avoids false scores)   |
 |    └── Persists report + scores atomically in PostgreSQL              |
 +───────────────────────────────────────────────────────────────────────+
+        │
+        ├──► evaluations (Executive summary, composite score, recommendation)
+        └──► evaluation_criteria_results (Per-criterion scores & verbatim quotes)
 ```
 
 ---
 
 ## Key Modules & Implementations
 
-### 1. Dual-Broker Consumer (`internal/worker/consumer.go`)
-- **Kafka Mode**: Activated when `KAFKA_BROKERS` is set. Consumes from `interview.completed` using group `evaluation-worker-group`.
-- **Postgres Outbox Mode**: Activated when `KAFKA_BROKERS` is empty. Polls `outbox_completed` using:
+### 1. PostgreSQL Outbox Consumer (`internal/worker/evaluation.go`)
+- Polls `outbox_completed` using:
   ```sql
   SELECT id, session_id, org_id, retry_count
   FROM outbox_completed
@@ -53,20 +55,15 @@ Kafka: interview.completed / Postgres: outbox_completed
   LIMIT 1
   FOR UPDATE SKIP LOCKED;
   ```
-  Guarantees zero contention across multiple worker replicas and head-of-line poison pill avoidance via bounded retries (`max_retries = 5`).
+- Guarantees zero contention across multiple worker replicas and head-of-line poison pill avoidance via bounded retries (`max_retries = 5`).
 
-### 2. Transcript Completeness Barrier (`internal/worker/evaluation.go`)
-- Prevents race conditions where an evaluation commences before the `turn-projector` finishes writing final turns.
+### 2. Transcript Completeness Barrier
+- Prevents race conditions where an evaluation commences before the turn projector finishes writing final turns.
 - Verifies contiguous turn sequences and blocks with exponential backoff up to 10 seconds.
 
-### 3. Evidence Grounding Validator (`internal/worker/grounding.go`)
-- Validates every quote cited by the LLM as proof of candidate competence.
-- Strips trivial affirmative tokens (*"Yes"*, *"Right"*, *"Sure"*).
-- Enforces exact verbatim substring matching against candidate turns, dropping adversarial affirmative false accepts from **80.0% to 0.0%** with **100% precision**.
-
-### 4. Bounded-Concurrent Scatter-Gather
-- Manages concurrency via a buffered channel token bucket (`sem := make(chan struct{}, 5)`).
-- Eliminates provider rate-limit throttling (TPM/RPM) while achieving 5.0x throughput compared to serial evaluation loops.
+### 3. Substantive Evidence Attribution Guard (`IsSubstantiveEvidence`)
+- Rejects generic conversational filler phrases (*"yes"*, *"okay"*, *"I see"*).
+- Requires exact substring matches against the candidate's transcribed turns, dropping affirmative false accepts from **80.0% to 0.0%**.
 
 ---
 
@@ -75,23 +72,16 @@ Kafka: interview.completed / Postgres: outbox_completed
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `DATABASE_URL` | — | PostgreSQL connection string |
-| `KAFKA_BROKERS` | `""` | Comma-separated Kafka broker addresses (uses Outbox if empty) |
-| `GROQ_API_KEY` | — | Primary LLM provider key (Groq Llama 3.3 70B) |
-| `OPENAI_API_KEY` | — | Fallback LLM provider key |
-| `ANTHROPIC_API_KEY` | — | Fallback LLM provider key |
-| `EVALUATION_DEMO_MODE` | `false` | When true, uses deterministic mock evaluation responses |
+| `JOB_CANDIDATE_SERVICE_URL` | `http://localhost:8001` | Platform service URL for blueprint rubrics |
+| `INTERNAL_API_KEY` | — | Shared key for inter-service HTTP authentication |
+| `GROQ_API_KEY` | — | Groq API key for LLaMA 3.3 70B evaluation prompts |
+| `FEEDBACK_LLM_MODE` / `EVALUATION_LLM_MODE` | `groq` | `groq` for live evaluation, `mock` for local offline testing |
 
 ---
 
 ## Running & Testing
 
 ```bash
-# Run unit tests
+# Run unit and grounding verification tests
 go test -v ./...
-
-# Run grounding benchmark (verbatim attribution precision & recall)
-go test -v -run=TestGroundingValidatorBenchmark ./internal/worker/...
-
-# Run evaluation reliability & failure preservation tests
-go test -v -run=TestEvaluationReliabilityBenchmark ./internal/worker/...
 ```

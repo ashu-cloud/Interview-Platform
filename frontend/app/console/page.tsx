@@ -43,7 +43,7 @@ export default function ConsolePage() {
 
   // Compute real metrics
   const completedSessions = sessions.filter(
-    (s) => s.status === "completed" || s.status === "feedback_ready"
+    (s) => s.status === "completed" || s.status === "feedback_ready" || s.status === "evaluation_ready" || s.status === "evaluation_ready"
   );
   const inProgressSessions = sessions.filter((s) => s.status === "in_progress");
 

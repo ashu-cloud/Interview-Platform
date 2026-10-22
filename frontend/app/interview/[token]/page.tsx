@@ -41,6 +41,16 @@ function LiveCandidateStageContent() {
   const [showEndModal, setShowEndModal] = useState(false);
   const [isSessionCompleted, setIsSessionCompleted] = useState(false);
   const [isRestarting, setIsRestarting] = useState<boolean>(false);
+  const [debugMode, setDebugMode] = useState<boolean>(false);
+  const [consentChecked, setConsentChecked] = useState<boolean>(false);
+  const [chimePlaying, setChimePlaying] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      setDebugMode(sp.get("debug") === "1");
+    }
+  }, []);
 
   // References
   const wsRef = useRef<WebSocket | null>(null);
@@ -51,6 +61,8 @@ function LiveCandidateStageContent() {
   const interruptedTurnRef = useRef<number>(0);
   const micStreamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const preflightVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const isAgentTurnRef = useRef<boolean>(false);
@@ -117,7 +129,6 @@ function LiveCandidateStageContent() {
   useEffect(() => {
     if (!validation?.valid) return;
     let cameraStream: MediaStream | null = null;
-    const currentVideo = videoRef.current;
 
     async function startCamera() {
       try {
@@ -125,9 +136,19 @@ function LiveCandidateStageContent() {
           video: true,
           audio: false,
         });
+        cameraStreamRef.current = cameraStream;
         if (videoRef.current) {
           videoRef.current.srcObject = cameraStream;
         }
+        if (preflightVideoRef.current) {
+          preflightVideoRef.current.srcObject = cameraStream;
+        }
+        setIsCamActive(true);
+        cameraStream.getVideoTracks().forEach((track) => {
+          track.onended = () => setIsCamActive(false);
+          track.onmute = () => setIsCamActive(false);
+          track.onunmute = () => setIsCamActive(true);
+        });
       } catch (err) {
         console.warn("Camera access declined or unavailable:", err);
         setIsCamActive(false);
@@ -139,11 +160,21 @@ function LiveCandidateStageContent() {
       if (cameraStream) {
         cameraStream.getTracks().forEach((t) => t.stop());
       }
-      if (currentVideo && currentVideo.srcObject) {
-        (currentVideo.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
-      }
+      cameraStreamRef.current = null;
     };
   }, [validation]);
+
+  // Synchronize camera video feeds across preflight & live stage transitions
+  useEffect(() => {
+    if (cameraStreamRef.current && isCamActive) {
+      if (videoRef.current && videoRef.current.srcObject !== cameraStreamRef.current) {
+        videoRef.current.srcObject = cameraStreamRef.current;
+      }
+      if (preflightVideoRef.current && preflightVideoRef.current.srcObject !== cameraStreamRef.current) {
+        preflightVideoRef.current.srcObject = cameraStreamRef.current;
+      }
+    }
+  }, [hasEnteredStage, isCamActive]);
 
   // Helper: Stop all currently scheduled and playing audio buffers (Barge-In)
   const stopAllAudioPlayback = useCallback(() => {
@@ -164,7 +195,7 @@ function LiveCandidateStageContent() {
 
   // 3. Setup WebSocket & Conversational Audio Playback
   useEffect(() => {
-    if (!validation?.valid || !token) return;
+    if (!validation?.valid || !token || !hasEnteredStage) return;
 
     // Web Audio Context for gapless chunk playback
     const AudioContextClass =
@@ -181,9 +212,6 @@ function LiveCandidateStageContent() {
     ws.onopen = () => {
       setIsConnected(true);
       setTurnStatusText("Stage online. Ready to begin...");
-      if (hasEnteredStageRef.current) {
-        ws.send(JSON.stringify({ type: "reset_session" }));
-      }
     };
 
     ws.onmessage = async (event) => {
@@ -191,6 +219,19 @@ function LiveCandidateStageContent() {
         const msg = JSON.parse(event.data);
 
         switch (msg.type) {
+          case "connected":
+            setIsConnected(true);
+            if (typeof msg.turn === "number" && msg.turn > 0) {
+              setTurnNumber(msg.turn);
+              turnNumberRef.current = msg.turn;
+            }
+            if (msg.has_history) {
+              setTurnStatusText("Reconnected to ongoing assessment.");
+            } else {
+              setTurnStatusText("Stage online. Ready to begin...");
+            }
+            break;
+
           case "ai_speaking":
             setIsAgentTurn(msg.speaking);
             if (msg.speaking) {
@@ -328,6 +369,8 @@ function LiveCandidateStageContent() {
             });
             break;
 
+          case "assessment_complete":
+          case "interview_complete":
           case "session_completed":
             setIsSessionCompleted(true);
             setTurnStatusText("Assessment session completed.");
@@ -358,7 +401,7 @@ function LiveCandidateStageContent() {
         audioContextRef.current.close().catch(() => {});
       }
     };
-  }, [validation, token, stopAllAudioPlayback]);
+  }, [validation, token, hasEnteredStage, stopAllAudioPlayback]);
 
   // 4. Continuous Microphone Ingest with WebRTC AEC, Voice-Bandpass VAD & Free-Tier 16kHz Linear PCM Streamer
   useEffect(() => {
@@ -388,6 +431,12 @@ function LiveCandidateStageContent() {
         }
 
         micStreamRef.current = stream;
+        setIsMicActive(true);
+        stream.getAudioTracks().forEach((track) => {
+          track.onended = () => setIsMicActive(false);
+          track.onmute = () => setIsMicActive(false);
+          track.onunmute = () => setIsMicActive(true);
+        });
 
         // Web Audio Analyser for VAD & dynamic VU meters
         const AudioContextClass =
@@ -439,23 +488,19 @@ function LiveCandidateStageContent() {
             (audioContextRef.current !== null &&
               nextAudioStartTimeRef.current > audioContextRef.current.currentTime);
 
-          // VAD Adaptation Freeze: ONLY adapt noise floor when candidate is NOT speaking and Voxi is NOT emitting sound
-          // Prevents the candidate's own voice from poisoning the threshold during long answers
-          if (!isUserSpeakingRef.current && !isAudioActivelyPlaying) {
+          if (!isAudioActivelyPlaying) {
             noiseFloorRef.current = Math.min(
-              Math.max(noiseFloorRef.current * 0.96 + voiceBandAvg * 0.04, 16),
-              65
+              Math.max(noiseFloorRef.current * 0.98 + voiceBandAvg * 0.02, 12),
+              55
             );
           }
 
-          // Elevated Adaptive Thresholds
-          // Deliberate barge-in requires strong energy over speakers (threshold 45+, 18 frames)
-          // Normal speaking requires voice-band energy above 30, sustained for 10 frames (~160ms) to ignore breaths/clicks
+          // Barge-in requires deliberate energy over speakers (threshold 40+, 12 frames)
           const speechThreshold = isAudioActivelyPlaying
-            ? Math.max(45, noiseFloorRef.current * 2.4)
-            : Math.max(30, noiseFloorRef.current * 1.85);
+            ? Math.max(40, noiseFloorRef.current * 2.2)
+            : Math.max(20, noiseFloorRef.current * 1.3);
 
-          const requiredFrames = isAudioActivelyPlaying ? 18 : 10;
+          const requiredFrames = isAudioActivelyPlaying ? 12 : 4;
 
           if (voiceBandAvg > speechThreshold && isMicActiveRef.current) {
             consecutiveSpeechFrames++;
@@ -464,7 +509,7 @@ function LiveCandidateStageContent() {
             }
 
             // Candidate interruption detected ONLY while audio is actively playing out of speakers
-            if (isAudioActivelyPlaying && consecutiveSpeechFrames >= 18) {
+            if (isAudioActivelyPlaying && consecutiveSpeechFrames >= 12) {
               stopAllAudioPlayback();
               interruptedTurnRef.current = turnNumberRef.current;
               setIsAgentTurn(false);
@@ -477,8 +522,10 @@ function LiveCandidateStageContent() {
               }
             }
           } else {
-            consecutiveSpeechFrames = 0;
-            setIsUserSpeaking(false);
+            consecutiveSpeechFrames = Math.max(0, consecutiveSpeechFrames - 1);
+            if (consecutiveSpeechFrames === 0) {
+              setIsUserSpeaking(false);
+            }
           }
 
           animFrameRef.current = requestAnimationFrame(updateEnergyLoop);
@@ -486,46 +533,31 @@ function LiveCandidateStageContent() {
 
         animFrameRef.current = requestAnimationFrame(updateEnergyLoop);
 
-        // High-Performance 16kHz Linear PCM Streamer (Zero container headers, Free-Tier Resource Efficient)
+        // High-Performance 16kHz Linear PCM Streamer
         // Downsamples Float32 PCM to 16,000Hz mono Int16
         const bufferSize = 2048;
         processorNode = vadAudioCtx.createScriptProcessor(bufferSize, 1, 1);
         const targetSampleRate = 16000;
         const sampleRatio = vadAudioCtx.sampleRate / targetSampleRate;
 
-        let speechHangover = 0;
-
         processorNode.onaudioprocess = (e) => {
           if (!isSubscribed || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
           if (!isMicActiveRef.current) return;
-
-          const isAudioActivelyPlaying =
-            activeSourcesRef.current.length > 0 ||
-            (audioContextRef.current !== null &&
-              nextAudioStartTimeRef.current > audioContextRef.current.currentTime);
-
-          // Natural Ambient Post-Speech Hangover Window:
-          // Keep sending ambient audio for 1.2s (~25 cycles) so Deepgram reliably detects endpointing silence
-          if (isUserSpeakingRef.current) {
-            speechHangover = 25;
-          } else if (speechHangover > 0) {
-            speechHangover--;
-          }
-
-          // FREE TIER CONSERVATION GUARD:
-          // 1. If Voxi is speaking, DO NOT send mic audio to Deepgram unless candidate is deliberately interrupting
-          // 2. If Voxi is quiet, only stream when user is actively speaking or in ambient hangover window
-          const shouldStreamAudio = speechHangover > 0 || (!isAudioActivelyPlaying && consecutiveSpeechFrames > 0);
-          if (!shouldStreamAudio) return;
 
           const inputData = e.inputBuffer.getChannelData(0);
           const outputLength = Math.floor(inputData.length / sampleRatio);
           const pcmData = new Int16Array(outputLength);
 
-          // Fast linear resampler to 16kHz + Float32 to Int16 conversion
+          // Anti-aliasing box filter + Float32 to Int16 conversion
           for (let i = 0; i < outputLength; i++) {
-            const index = Math.floor(i * sampleRatio);
-            const s = Math.max(-1, Math.min(1, inputData[index]));
+            const startIdx = Math.floor(i * sampleRatio);
+            const endIdx = Math.min(inputData.length, Math.floor((i + 1) * sampleRatio));
+            let sum = 0;
+            const count = Math.max(1, endIdx - startIdx);
+            for (let j = startIdx; j < endIdx; j++) {
+              sum += inputData[j];
+            }
+            const s = Math.max(-1, Math.min(1, sum / count));
             pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
           }
 
@@ -536,6 +568,20 @@ function LiveCandidateStageContent() {
             binary += String.fromCharCode(bytes[i]);
           }
           const base64 = btoa(binary);
+
+          const isAudioActivelyPlaying =
+            activeSourcesRef.current.length > 0 ||
+            (audioContextRef.current !== null &&
+              nextAudioStartTimeRef.current > audioContextRef.current.currentTime);
+
+          // Continuous audio stream to Deepgram STT when Voxi is not speaking.
+          // Deepgram's server-side neural VAD accurately segments speech and handles natural pauses.
+          // When Voxi IS speaking, audio streams if candidate interrupts.
+          const shouldStreamAudio = !isAudioActivelyPlaying || isUserSpeakingRef.current;
+
+          if (!shouldStreamAudio) {
+            return;
+          }
 
           wsRef.current.send(
             JSON.stringify({
@@ -582,31 +628,117 @@ function LiveCandidateStageContent() {
     };
   }, [validation, stopAllAudioPlayback]);
 
-  // Toggle Microphone Mute
-  const toggleMic = () => {
-    setIsMicActive((prev) => {
-      const next = !prev;
-      if (micStreamRef.current) {
-        micStreamRef.current.getAudioTracks().forEach((t) => {
-          t.enabled = next;
-        });
+  // Re-enable / Toggle Microphone
+  const toggleMic = async () => {
+    if (micStreamRef.current && micStreamRef.current.getAudioTracks().length > 0) {
+      const track = micStreamRef.current.getAudioTracks()[0];
+      if (track.readyState !== "ended") {
+        const next = !isMicActive;
+        track.enabled = next;
+        setIsMicActive(next);
+        return;
       }
-      return next;
-    });
+    }
+    try {
+      const fresh = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      micStreamRef.current = fresh;
+      setIsMicActive(true);
+      fresh.getAudioTracks().forEach((track) => {
+        track.onended = () => setIsMicActive(false);
+        track.onmute = () => setIsMicActive(false);
+        track.onunmute = () => setIsMicActive(true);
+      });
+    } catch {
+      setIsMicActive(false);
+    }
   };
 
-  // Toggle Camera Mute
-  const toggleCam = () => {
-    setIsCamActive((prev) => {
-      const next = !prev;
-      if (videoRef.current && videoRef.current.srcObject) {
-        (videoRef.current.srcObject as MediaStream).getVideoTracks().forEach((t) => {
-          t.enabled = next;
-        });
+  // Re-enable / Toggle Camera
+  const toggleCam = async () => {
+    if (cameraStreamRef.current && cameraStreamRef.current.getVideoTracks().length > 0) {
+      const track = cameraStreamRef.current.getVideoTracks()[0];
+      if (track.readyState !== "ended") {
+        const next = !isCamActive;
+        track.enabled = next;
+        setIsCamActive(next);
+        return;
       }
-      return next;
-    });
+    }
+    try {
+      const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      cameraStreamRef.current = cameraStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = cameraStream;
+      }
+      if (preflightVideoRef.current) {
+        preflightVideoRef.current.srcObject = cameraStream;
+      }
+      setIsCamActive(true);
+      cameraStream.getVideoTracks().forEach((track) => {
+        track.onended = () => setIsCamActive(false);
+        track.onmute = () => setIsCamActive(false);
+        track.onunmute = () => setIsCamActive(true);
+      });
+    } catch {
+      setIsCamActive(false);
+    }
   };
+
+  const playTestChime = () => {
+    try {
+      setChimePlaying(true);
+      const AudioCtxClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioCtxClass();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      gain.gain.setValueAtTime(0.12, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.4);
+      setTimeout(() => setChimePlaying(false), 500);
+    } catch (e) {
+      console.warn("Test chime failed:", e);
+      setChimePlaying(false);
+    }
+  };
+
+  const handleFinishSpeaking = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isAgentTurn) {
+      wsRef.current.send(JSON.stringify({ type: "finish_turn" }));
+      setTurnStatusText("Submitted answer. Voxi is responding...");
+    }
+  }, [isAgentTurn]);
+
+  // Keyboard shortcut: Press Enter to Finish Answer during candidate turn
+  useEffect(() => {
+    if (!hasEnteredStage) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+      if (e.key === "Enter" && !isAgentTurn) {
+        e.preventDefault();
+        handleFinishSpeaking();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [hasEnteredStage, isAgentTurn, handleFinishSpeaking]);
 
   const handleEnterStage = async () => {
     // 1. Resume both AudioContext instances within this explicit user gesture
@@ -626,22 +758,24 @@ function LiveCandidateStageContent() {
     }
     setHasEnteredStage(true);
     hasEnteredStageRef.current = true;
-    // 2. Trigger fresh session reset and greeting turn
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "reset_session" }));
-    }
   };
 
   const handleEndSession = () => {
     stopAllAudioPlayback();
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "end_assessment" }));
+    }
     if (micStreamRef.current) {
       micStreamRef.current.getTracks().forEach((t) => t.stop());
     }
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    setIsSessionCompleted(true);
-    setShowEndModal(false);
+    // Graceful fallback to close if server acknowledgment is delayed
+    setTimeout(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
+      setIsSessionCompleted(true);
+      setShowEndModal(false);
+    }, 1500);
   };
 
   const handleResetSession = useCallback(() => {
@@ -728,57 +862,313 @@ function LiveCandidateStageContent() {
     );
   }
 
+  if (!hasEnteredStage) {
+    return (
+      <div className="min-h-screen bg-[#fbf9f5] text-[#141413] flex flex-col font-sans selection:bg-[#141413] selection:text-[#fbf9f5]">
+        {/* Monograph Top Navigation */}
+        <header className="w-full border-b border-[#e5e2da] bg-white px-6 lg:px-12 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <Link href="/" className="flex items-center gap-2 group">
+              <Logo size={20} />
+              <span className="font-mono text-xs font-bold tracking-tight text-[#141413]">
+                VOXI ASSESSMENT ENGINE
+              </span>
+            </Link>
+            <span className="text-[#c7c7c0] font-mono text-xs">/</span>
+            <span className="font-mono text-[11px] tracking-wider uppercase text-[#797670]">
+              PLATE NO. 02 • PRE-FLIGHT VERIFICATION
+            </span>
+          </div>
+
+          <div className="flex items-center gap-3 font-mono text-[11px] text-[#57534e]">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="tracking-wider uppercase font-semibold text-[#141413]">
+              GATEWAY READY
+            </span>
+            <span className="text-[#c7c7c0]">•</span>
+            <span className="text-[#797670] font-mono">
+              tok_{token ? token.slice(0, 8) : "valid"}
+            </span>
+          </div>
+        </header>
+
+        {/* Main Monograph Setup Stage Body */}
+        <main className="flex-1 w-full max-w-5xl mx-auto px-6 py-10 lg:py-14 flex flex-col justify-center space-y-10">
+          {/* Folio Headstone */}
+          <div className="space-y-2 pb-6 border-b border-[#e5e2da]">
+            <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.2em] text-[#797670] uppercase">
+              <span>FOLIO REF. STAGE-01</span>
+              <span>•</span>
+              <span>AUTONOMOUS ACOUSTIC &amp; VIDEO CALIBRATION</span>
+            </div>
+            <h1 className="text-3xl md:text-4xl font-light tracking-tight text-[#141413]">
+              Participant Entry Stage
+            </h1>
+            <p className="font-serif italic text-lg md:text-xl text-[#57534e] leading-relaxed">
+              Verify your camera framing, acoustic microphone sensitivity, and audio output before entering the dialogue sanctuary.
+            </p>
+          </div>
+
+          {/* Candidate & Session Dossier */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 p-5 bg-white border border-[#e5e2da] rounded-xs font-mono text-xs">
+            <div className="space-y-1 md:col-span-2">
+              <span className="text-[10px] uppercase tracking-wider text-[#797670] block">Candidate Dossier</span>
+              <div className="font-sans text-base font-semibold text-[#141413]">
+                {validation.candidate?.full_name || validation.participant?.full_name || "Technical Candidate"}
+              </div>
+              <div className="text-[11px] text-[#797670]">
+                {validation.job_role?.title || validation.track?.title || "Technical System Assessment"}
+              </div>
+            </div>
+            <div className="space-y-1">
+              <span className="text-[10px] uppercase tracking-wider text-[#797670] block">Interviewer</span>
+              <div className="font-sans text-sm font-medium text-[#141413]">Voxi (Autonomous Assessor)</div>
+              <div className="text-[11px] text-[#797670]">Duplex Acoustic Engine</div>
+            </div>
+            <div className="space-y-1">
+              <span className="text-[10px] uppercase tracking-wider text-[#797670] block">Session Protocol</span>
+              <div className="font-sans text-sm font-medium text-[#141413]">Turn-Based Dialectic</div>
+              <div className="text-[11px] text-[#797670]">2.2s Pause Wait + Fast Submit</div>
+            </div>
+          </div>
+
+          {/* 3 Hardware & Acoustic Verification Stations */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Station 01: Live Camera Feed */}
+            <div className="p-5 bg-white border border-[#e5e2da] rounded-xs space-y-4 flex flex-col justify-between">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[10px] tracking-wider uppercase text-[#797670]">01 / Optical Feed</span>
+                  <span className={`w-2 h-2 rounded-full ${isCamActive ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
+                </div>
+                <div className="font-sans text-sm font-semibold text-[#141413]">HD Video Camera</div>
+                <div className="aspect-video w-full bg-[#141413] rounded-xs overflow-hidden relative flex items-center justify-center border border-[#e5e2da]">
+                  <video
+                    ref={preflightVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className={`w-full h-full object-cover ${!isCamActive ? "hidden" : ""}`}
+                  />
+                  {!isCamActive && (
+                    <div className="text-center p-3 space-y-1">
+                      <span className="text-xs text-red-400 block font-mono">Camera Disabled</span>
+                      <span className="text-[10px] text-neutral-400">Click below to grant access</span>
+                    </div>
+                  )}
+                  <div className="absolute bottom-1.5 left-1.5 bg-black/70 px-2 py-0.5 rounded-xs font-mono text-[9px] text-white uppercase">
+                    1080p Live Feed
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={toggleCam}
+                  className={`w-full py-2 font-mono text-xs uppercase tracking-wider font-semibold rounded-xs border transition-colors cursor-pointer flex items-center justify-center gap-2 ${
+                    isCamActive
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                      : "border-red-300 bg-red-600 text-white hover:bg-red-700"
+                  }`}
+                >
+                  <span>{isCamActive ? "✓ Camera Verified & Active" : "Grant Camera Access"}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Station 02: Studio Microphone & VU Meter */}
+            <div className="p-5 bg-white border border-[#e5e2da] rounded-xs space-y-4 flex flex-col justify-between">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[10px] tracking-wider uppercase text-[#797670]">02 / Acoustic Input</span>
+                  <span className={`w-2 h-2 rounded-full ${isMicActive ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
+                </div>
+                <div className="font-sans text-sm font-semibold text-[#141413]">Studio Microphone</div>
+
+                {/* Real-time VU Meter Bar Graph */}
+                <div className="aspect-video w-full bg-[#fbf9f5] border border-[#e5e2da] rounded-xs p-4 flex flex-col items-center justify-center space-y-3">
+                  <div className="flex items-center gap-1.5 h-12">
+                    {vuLevels.map((lvl, idx) => (
+                      <div
+                        key={idx}
+                        style={{ height: `${Math.max(lvl, 4)}px` }}
+                        className={`w-2 rounded-xs transition-all duration-75 ${
+                          !isMicActive
+                            ? "bg-red-300"
+                            : isUserSpeaking
+                            ? "bg-emerald-600"
+                            : "bg-[#141413]"
+                        }`}
+                      />
+                    ))}
+                  </div>
+                  <div className="font-mono text-[10px] text-[#797670] flex items-center gap-2">
+                    <span>Signal:</span>
+                    <span className={isUserSpeaking ? "text-emerald-700 font-bold" : "text-[#141413]"}>
+                      {isMicActive ? (isUserSpeaking ? "Voice Speaking Active" : "Detecting Ambient Level") : "Mic Inactive"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2">
+                <button
+                  type="button"
+                  onClick={toggleMic}
+                  className={`w-full py-2 font-mono text-xs uppercase tracking-wider font-semibold rounded-xs border transition-colors cursor-pointer flex items-center justify-center gap-2 ${
+                    isMicActive
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                      : "border-red-300 bg-red-600 text-white hover:bg-red-700"
+                  }`}
+                >
+                  <span>{isMicActive ? "✓ Microphone Verified" : "Grant Microphone Access"}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Station 03: Audio Monitoring & Cadence Guidelines */}
+            <div className="p-5 bg-white border border-[#e5e2da] rounded-xs space-y-4 flex flex-col justify-between">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[10px] tracking-wider uppercase text-[#797670]">03 / Audio &amp; Cadence</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                </div>
+                <div className="font-sans text-sm font-semibold text-[#141413]">Audio Output &amp; Pacing</div>
+
+                <div className="p-3.5 bg-[#fbf9f5] border border-[#e5e2da] rounded-xs space-y-2 font-sans text-xs text-[#57534e]">
+                  <div className="font-semibold text-[#141413] flex items-center gap-1.5 font-mono text-[11px] uppercase">
+                    <span>Conversational Cadence</span>
+                  </div>
+                  <ul className="space-y-1.5 text-[11px] leading-relaxed list-disc list-inside">
+                    <li><strong className="text-[#141413]">2.2s Pause Wait:</strong> Take your time to think; natural pauses will never cut you off.</li>
+                    <li><strong className="text-[#141413]">Fast Submit:</strong> Hit <span className="font-mono font-semibold">Enter</span> or click &ldquo;Finish Answer&rdquo; whenever done.</li>
+                    <li><strong className="text-[#141413]">Interruptible:</strong> Speak at any second to interrupt Voxi naturally.</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={playTestChime}
+                  disabled={chimePlaying}
+                  className="w-full py-2 font-mono text-xs uppercase tracking-wider font-semibold rounded-xs border border-[#e5e2da] bg-[#fbf9f5] hover:bg-neutral-800 hover:text-white text-[#141413] transition-colors cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <span>{chimePlaying ? "♪ Playing 440Hz Chime..." : "Test 440Hz Audio Output"}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Consent Checkbox & Primary Enter Action */}
+          <div className="pt-6 border-t border-[#e5e2da] space-y-6">
+            <label className="flex items-start gap-3.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={consentChecked}
+                onChange={(e) => setConsentChecked(e.target.checked)}
+                className="mt-0.5 rounded-none border-[#141413]/40 text-[#141413] focus:ring-0 w-4 h-4 accent-[#141413] cursor-pointer"
+              />
+              <span className="text-xs text-[#57534e] leading-relaxed group-hover:text-[#141413] transition-colors select-none">
+                I consent to continuous camera capture, microphone audio recording, and automated dialectic assessment evaluation for this interview.
+              </span>
+            </label>
+
+            <div className="flex flex-col sm:flex-row items-center gap-4">
+              <button
+                type="button"
+                disabled={!isCamActive || !isMicActive || !consentChecked}
+                onClick={handleEnterStage}
+                className={`w-full sm:w-auto px-8 py-4 font-mono text-xs uppercase tracking-[0.14em] font-semibold rounded-xs transition-all flex items-center justify-center gap-3 shadow-sm ${
+                  !isCamActive || !isMicActive || !consentChecked
+                    ? "bg-neutral-300 text-neutral-500 cursor-not-allowed opacity-60"
+                    : "bg-[#141413] hover:bg-neutral-800 text-white cursor-pointer"
+                }`}
+              >
+                <span>
+                  {!isCamActive
+                    ? "Camera Required"
+                    : !isMicActive
+                    ? "Microphone Required"
+                    : !consentChecked
+                    ? "Check Consent to Enter"
+                    : "Enter Interview Stage"}
+                </span>
+                <span>→</span>
+              </button>
+
+              <div className="font-mono text-[11px] text-[#797670]">
+                {!isCamActive || !isMicActive
+                  ? "Both camera and microphone must be active to proceed."
+                  : !consentChecked
+                  ? "Please accept the consent declaration above."
+                  : "All devices verified. Voxi will introduce itself when you enter."}
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-[#fbf9f5] text-sumi relative">
-      {/* Entry Stage Gate Modal (Guarantees user gesture for Web Audio autoplay & mic setup) */}
-      {!hasEnteredStage && (
-        <div className="fixed inset-0 z-50 bg-[#1b1c1a]/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#fbf9f5] border border-[#e5e2da] rounded-xs shadow-2xl max-w-lg w-full p-6 space-y-6 text-left">
-            <div className="border-b border-[#e5e2da] pb-4 flex items-center justify-between">
-              <div>
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#797670] block">
-                  Candidate Assessment Checkpoint
+
+      {/* Mandatory Camera & Microphone Active Enforcement Overlay during Stage */}
+      {hasEnteredStage && (!isCamActive || !isMicActive) && (
+        <div className="fixed inset-0 z-50 bg-[#141413]/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-white border-2 border-red-500 rounded-xs shadow-2xl max-w-md w-full p-6 text-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-red-100 border border-red-300 flex items-center justify-center mx-auto text-red-600 font-bold text-lg">
+              !
+            </div>
+            <div>
+              <span className="font-mono text-[10px] uppercase tracking-wider text-red-600 font-bold block">
+                Proctoring Requirement
+              </span>
+              <h3 className="font-sans text-xl font-semibold text-sumi mt-1">
+                Camera &amp; Microphone Required
+              </h3>
+              <p className="font-sans text-xs text-sumi-secondary mt-2 leading-relaxed">
+                Voxi requires both your camera and microphone to remain active continuously during this technical interview. The assessment dialogue is paused until both feeds are restored.
+              </p>
+            </div>
+
+            <div className="p-3 bg-[#fbf9f5] rounded-xs border border-[#e5e2da] text-left font-mono text-xs space-y-2">
+              <div className="flex items-center justify-between">
+                <span>Camera Feed:</span>
+                <span className={isCamActive ? "text-emerald-700 font-bold" : "text-red-600 font-bold"}>
+                  {isCamActive ? "Active ✓" : "Offline / Muted ✕"}
                 </span>
-                <h2 className="font-sans text-lg font-semibold text-[#1b1c1a] mt-0.5">
-                  {validation?.candidate?.full_name || validation?.participant?.full_name || "Candidate Assessment"}
-                </h2>
               </div>
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-            </div>
-
-            <div className="space-y-3 font-mono text-xs text-[#57534e]">
-              <div className="bg-white border border-[#e5e2da] p-3.5 rounded-xs space-y-2">
-                <div className="flex justify-between text-[11px]">
-                  <span className="text-[#797670]">Assessment Track:</span>
-                  <span className="font-semibold text-[#1b1c1a]">
-                    {validation?.job_role?.title || validation?.track?.title || "Technical System Evaluation"}
-                  </span>
-                </div>
-                <div className="flex justify-between text-[11px]">
-                  <span className="text-[#797670]">Interviewer:</span>
-                  <span className="font-semibold text-[#1b1c1a]">Voxi (AI Voice Assessor)</span>
-                </div>
-                <div className="flex justify-between text-[11px]">
-                  <span className="text-[#797670]">Mode:</span>
-                  <span className="text-emerald-700 font-medium">Hands-Free Conversational Voice</span>
-                </div>
-              </div>
-
-              <div className="p-3 bg-[#f2efe9] rounded-xs border border-[#e5e2da] space-y-1">
-                <p className="text-[11px] text-[#57534e] leading-relaxed">
-                  Click the button below to initialize your speakers and microphone. Once connected, Voxi will welcome you and ask the first question. Speak naturally at any time.
-                </p>
+              <div className="flex items-center justify-between">
+                <span>Microphone:</span>
+                <span className={isMicActive ? "text-emerald-700 font-bold" : "text-red-600 font-bold"}>
+                  {isMicActive ? "Active ✓" : "Offline / Muted ✕"}
+                </span>
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={handleEnterStage}
-              className="w-full py-3.5 bg-[#1b1c1a] hover:bg-neutral-800 text-white font-mono text-xs font-semibold tracking-wider uppercase rounded-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm"
-            >
-              <span>Enter Interview Stage</span>
-              <span className="text-xs">→</span>
-            </button>
+            <div className="pt-2 flex flex-col gap-2">
+              {!isCamActive && (
+                <button
+                  type="button"
+                  onClick={toggleCam}
+                  className="w-full py-2.5 bg-sumi text-white hover:bg-neutral-800 font-mono text-xs uppercase tracking-wider font-semibold rounded-xs transition-colors cursor-pointer"
+                >
+                  Turn On Camera
+                </button>
+              )}
+              {!isMicActive && (
+                <button
+                  type="button"
+                  onClick={toggleMic}
+                  className="w-full py-2.5 bg-sumi text-white hover:bg-neutral-800 font-mono text-xs uppercase tracking-wider font-semibold rounded-xs transition-colors cursor-pointer"
+                >
+                  Unmute Microphone
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -919,23 +1309,37 @@ function LiveCandidateStageContent() {
                 </div>
               </div>
 
-              {/* Floating Bottom Subtitle / Live STT Feed */}
-              <div className="w-full max-w-2xl bg-[#fbf9f5] border border-[#e5e2da] rounded-xs px-4 py-3 z-10 min-h-[52px] flex items-center justify-between">
-                <div className="flex items-center gap-2 overflow-hidden w-full font-mono text-xs">
-                  <span className="text-sumi-muted uppercase text-[10px] shrink-0 font-semibold">
-                    {liveSttText ? "Hearing You:" : "Voxi Status:"}
-                  </span>
-                  <span
-                    className={`truncate ${
-                      liveSttText ? "text-vermilion font-medium" : "text-sumi-secondary"
-                    }`}
-                  >
-                    {liveSttText ||
-                      (isAgentTurn
-                        ? "Voxi speaking..."
-                        : "Ready for your answer...")}
-                  </span>
+              {/* Floating Bottom Subtitle / Live STT Feed & Manual Finish Action */}
+              <div className="w-full max-w-2xl flex flex-col sm:flex-row items-center gap-3 z-10">
+                <div className="flex-1 bg-[#fbf9f5] border border-[#e5e2da] rounded-xs px-4 py-3 min-h-[52px] flex items-center justify-between w-full shadow-2xs">
+                  <div className="flex items-center gap-2 overflow-hidden w-full font-mono text-xs">
+                    <span className="text-sumi-muted uppercase text-[10px] shrink-0 font-semibold">
+                      {liveSttText ? "Hearing You:" : "Voxi Status:"}
+                    </span>
+                    <span
+                      className={`truncate ${
+                        liveSttText ? "text-vermilion font-medium" : "text-sumi-secondary"
+                      }`}
+                    >
+                      {liveSttText ||
+                        (isAgentTurn
+                          ? "Voxi speaking..."
+                          : "Listening to your answer naturally (2.2s pause grace period)...")}
+                    </span>
+                  </div>
                 </div>
+
+                {!isAgentTurn && (
+                  <button
+                    type="button"
+                    onClick={handleFinishSpeaking}
+                    className="px-5 py-3.5 bg-[#141413] hover:bg-neutral-800 text-white font-mono text-xs uppercase tracking-wider font-semibold rounded-xs transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm cursor-pointer"
+                    title="Submit your answer immediately without waiting for the 2.2s silence timer (Shortcut: Enter key)"
+                  >
+                    <span>Finish Answer</span>
+                    <span className="text-[10px] opacity-70 font-mono">(Enter ↵)</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -988,24 +1392,28 @@ function LiveCandidateStageContent() {
                 <button
                   type="button"
                   onClick={toggleMic}
-                  className={`px-3 py-1.5 rounded-xs font-mono text-xs border transition-colors cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-xs font-mono text-xs border transition-colors cursor-pointer flex items-center gap-1.5 ${
                     isMicActive
-                      ? "border-[#e5e2da] hover:border-sumi bg-white text-sumi"
-                      : "border-red-300 bg-red-50 text-red-700 font-semibold"
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-800 font-semibold"
+                      : "border-red-300 bg-red-50 text-red-700 font-semibold animate-pulse"
                   }`}
+                  title={isMicActive ? "Microphone active & required" : "Microphone offline! Click to enable"}
                 >
-                  {isMicActive ? "Mute Mic" : "Unmute Mic"}
+                  <span className={`w-1.5 h-1.5 rounded-full ${isMicActive ? "bg-emerald-600" : "bg-red-600"}`} />
+                  <span>{isMicActive ? "Mic Live (Required)" : "Enable Mic"}</span>
                 </button>
                 <button
                   type="button"
                   onClick={toggleCam}
-                  className={`px-3 py-1.5 rounded-xs font-mono text-xs border transition-colors cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-xs font-mono text-xs border transition-colors cursor-pointer flex items-center gap-1.5 ${
                     isCamActive
-                      ? "border-[#e5e2da] hover:border-sumi bg-white text-sumi"
-                      : "border-red-300 bg-red-50 text-red-700 font-semibold"
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-800 font-semibold"
+                      : "border-red-300 bg-red-50 text-red-700 font-semibold animate-pulse"
                   }`}
+                  title={isCamActive ? "Camera active & required" : "Camera offline! Click to enable"}
                 >
-                  {isCamActive ? "Stop Cam" : "Start Cam"}
+                  <span className={`w-1.5 h-1.5 rounded-full ${isCamActive ? "bg-emerald-600" : "bg-red-600"}`} />
+                  <span>{isCamActive ? "Cam Live (Required)" : "Enable Cam"}</span>
                 </button>
               </div>
             </div>
@@ -1163,6 +1571,44 @@ function LiveCandidateStageContent() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Voice Diagnostics Telemetry Overlay */}
+      {debugMode && (
+        <aside aria-label="Voice Debug Telemetry" className="fixed bottom-4 right-4 z-50 bg-[#1b1c1a]/95 text-white border border-[#44403c] rounded p-3 font-mono text-[10px] space-y-1 shadow-lg max-w-xs">
+          <div className="font-bold text-emerald-400 border-b border-[#44403c] pb-1 uppercase tracking-wider">
+            Voice Diagnostics
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#a8a29e]">WS:</span>
+            <span>{isConnected ? "Connected" : "Disconnected"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#a8a29e]">AudioContext:</span>
+            <span>{audioContextRef.current?.state || "none"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#a8a29e]">Turn:</span>
+            <span>#{turnNumber}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#a8a29e]">Voxi Speaking:</span>
+            <span className={isAgentTurn ? "text-amber-400" : "text-[#78716c]"}>{isAgentTurn ? "YES" : "NO"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#a8a29e]">Candidate Speaking:</span>
+            <span className={isUserSpeaking ? "text-emerald-400" : "text-[#78716c]"}>{isUserSpeaking ? "YES" : "NO"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#a8a29e]">Noise Floor:</span>
+            <span>{Math.round(noiseFloorRef.current)}</span>
+          </div>
+          {liveSttText && (
+            <div className="border-t border-[#44403c] pt-1 text-[9px] text-[#d6d3d1] truncate">
+              STT: {liveSttText}
+            </div>
+          )}
+        </aside>
       )}
     </div>
   );

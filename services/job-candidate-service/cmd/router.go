@@ -62,6 +62,8 @@ func registerRoutes(r *gin.Engine, handlers routeHandlers, jwtSecret, internalAP
 
 	v1.POST("/auth/register", handlers.auth.Register)
 	v1.POST("/auth/login", handlers.auth.Login)
+	v1.GET("/public/tracks/:job_id", handlers.invite.GetPublicTrack)
+	v1.POST("/public/tracks/:job_id/apply", handlers.invite.PublicApply)
 	// Deprecated frontend compatibility route. Remove when frontend is updated.
 	v1.GET("/invites/validate/:token", handlers.invite.ValidateToken)
 
@@ -86,8 +88,10 @@ func registerRoutes(r *gin.Engine, handlers routeHandlers, jwtSecret, internalAP
 		authed.POST("/participants/:candidate_id/invite", handlers.invite.Create)
 
 		authed.POST("/sessions", handlers.invite.CreateSession)
+		authed.GET("/sessions", handlers.invite.ListInterviews)
 		authed.GET("/sessions/:interview_id", handlers.invite.GetSession)
 		authed.GET("/sessions/:interview_id/turns", handlers.invite.ListSessionTurns)
+		authed.GET("/sessions/:interview_id/evaluation", handlers.invite.GetFeedback)
 		authed.POST("/sessions/:interview_id/evaluation", handlers.invite.EnqueueEvaluation)
 
 		// Deprecated frontend compatibility route. Remove when frontend is updated.

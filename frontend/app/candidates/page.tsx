@@ -87,7 +87,13 @@ function CandidatesContent() {
 
   const filteredSessions = useMemo(() => {
     return sessions.filter((s) => {
-      if (statusFilter !== "all" && s.status !== statusFilter) return false;
+      if (statusFilter !== "all") {
+        if (statusFilter === "feedback_ready" || statusFilter === "evaluation_ready") {
+          if (s.status !== "feedback_ready" && s.status !== "evaluation_ready") return false;
+        } else if (s.status !== statusFilter) {
+          return false;
+        }
+      }
       if (selectedTrackFilter !== "all" && s.track_id !== selectedTrackFilter) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
@@ -310,7 +316,7 @@ function CandidatesContent() {
                       <td className="py-3.5 px-4 font-mono text-[10px] uppercase">
                         <span
                           className={`px-2 py-0.5 rounded-xs font-bold inline-flex items-center gap-1 ${
-                            s.status === "completed" || s.status === "feedback_ready"
+                            s.status === "completed" || s.status === "feedback_ready" || s.status === "evaluation_ready"
                               ? "bg-emerald-100 text-emerald-800"
                               : s.status === "in_progress"
                               ? "bg-blue-100 text-blue-800 animate-pulse"

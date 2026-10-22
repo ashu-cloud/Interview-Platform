@@ -49,6 +49,7 @@ type WSMessage struct {
 	Sequence    int    `json:"sequence,omitempty"`
 	IsFinal     bool   `json:"is_final,omitempty"`
 	Speaking    bool   `json:"speaking,omitempty"`
+	HasHistory  bool   `json:"has_history,omitempty"`
 }
 
 type turnController struct {
@@ -132,6 +133,7 @@ type WebSocketHandler struct {
 	adaptiveEngine *adaptive.Engine
 	ragPrefetcher  *rag.Prefetcher
 	dbPool         *pgxpool.Pool
+	voiceDebug     bool
 }
 
 func NewWebSocketHandler(jcsClient integration.JCSClient, sessMgr session.Manager, sttClient stt.Adapter, llmPool *llm.Pool, ttsClient tts.Adapter, eventPublisher publisher.Publisher) *WebSocketHandler {
@@ -143,6 +145,10 @@ func NewWebSocketHandler(jcsClient integration.JCSClient, sessMgr session.Manage
 		ttsClient:      ttsClient,
 		eventPublisher: eventPublisher,
 	}
+}
+
+func (h *WebSocketHandler) SetVoiceDebug(debug bool) {
+	h.voiceDebug = debug
 }
 
 func (h *WebSocketHandler) SetAudioOffloader(offloader *storage.AudioOffloader) {
@@ -230,8 +236,11 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 		})
 	}
 
-	// 1. Validate Invite
-	slog.Info("validating invite", "token", token)
+	tokenMask := token
+	if len(token) > 8 {
+		tokenMask = token[:4] + "..." + token[len(token)-4:]
+	}
+	slog.Info("validating invite", "token", tokenMask)
 	inviteRes, err := h.jcsClient.ValidateInvite(ctx, token)
 	if err != nil {
 		slog.Error("invite validation failed", "error", err)
@@ -340,6 +349,8 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 		Type:        "connected",
 		InterviewID: interviewID,
 		SessionID:   interviewID,
+		Turn:        sess.TurnNumber,
+		HasHistory:  len(sess.ConversationHistory) > 0,
 	})
 
 	tc := &turnController{}
@@ -371,11 +382,13 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 	}
 
 	var (
-		lastInterimMu     sync.Mutex
-		lastInterimText   string
-		lastInterimTime   time.Time
-		lastCommittedTurn int64 = -1
-		turnCommitMu      sync.Mutex
+		turnAccMu          sync.Mutex
+		committedPhrases   []string
+		activeInterim      string
+		lastSpeechActivity time.Time
+		speechActive       bool
+		lastCommittedTurn  int64 = -1
+		turnCommitMu       sync.Mutex
 	)
 
 	commitTurn := func(text string, targetTurn int64) bool {
@@ -400,7 +413,7 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 			tc.interrupt()
 			send(WSMessage{
 				Type: "ai_interrupted",
-				Turn: int(targetTurn),
+				Turn: int(curTurn.Load()),
 			})
 		}
 		flushAudioBuffer(int(targetTurn))
@@ -409,7 +422,7 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 		return true
 	}
 
-	// Goroutine B — STT Session Manager with 900ms Speech Stability Auto-Commit Fallback
+	// Goroutine B — STT Session Manager with 2200ms Conversational Silence Debounce
 	go func() {
 		var currentSession stt.StreamingSession
 		var currentCancel context.CancelFunc
@@ -434,18 +447,38 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 			case <-connDone:
 				return
 			case <-ticker.C:
-				lastInterimMu.Lock()
-				hasCandidate := lastInterimText != "" && time.Since(lastInterimTime) > 900*time.Millisecond
-				candidateText := lastInterimText
-				if hasCandidate {
-					lastInterimText = ""
+				// Do not trigger turn completion while Voxi is actively speaking
+				if tc.isSpeaking() {
+					continue
 				}
-				lastInterimMu.Unlock()
 
-				if hasCandidate {
+				turnAccMu.Lock()
+				var parts []string
+				for _, p := range committedPhrases {
+					parts = append(parts, p)
+				}
+				if activeInterim != "" {
+					parts = append(parts, activeInterim)
+				}
+				fullCandidateText := strings.TrimSpace(strings.Join(parts, " "))
+				hasSpoken := speechActive && len(strings.Fields(fullCandidateText)) >= 2 && !isFillerOnly(fullCandidateText)
+				silenceDuration := time.Since(lastSpeechActivity)
+
+				// Require 2200ms (2.2 seconds) of sustained silence before considering candidate's turn complete
+				shouldAutoCommit := hasSpoken && silenceDuration >= 2200*time.Millisecond
+				if shouldAutoCommit {
+					committedPhrases = nil
+					activeInterim = ""
+					speechActive = false
+				}
+				turnAccMu.Unlock()
+
+				if shouldAutoCommit {
 					target := curTurn.Load() + 1
-					if commitTurn(candidateText, target) {
-						slog.Info("stability timer committed speech turn", "interview_id", interviewID, "turn", target, "text", candidateText)
+					if commitTurn(fullCandidateText, target) {
+						slog.Info("conversational silence wait committed speech turn",
+							"interview_id", interviewID, "turn", target,
+							"silence_ms", silenceDuration.Milliseconds(), "text", fullCandidateText)
 					}
 				}
 
@@ -467,23 +500,38 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 					go func(activeSession stt.StreamingSession) {
 						for res := range activeSession.Results() {
 							clean := strings.TrimSpace(strings.Trim(res.Text, ".,!?-~ "))
-							if res.SpeechFinal {
-								commitTurn(res.Text, curTurn.Load()+1)
-								lastInterimMu.Lock()
-								lastInterimText = ""
-								lastInterimMu.Unlock()
-							} else {
+							turnAccMu.Lock()
+							if clean != "" {
+								speechActive = true
+								lastSpeechActivity = time.Now()
+								if res.IsFinal {
+									committedPhrases = append(committedPhrases, clean)
+									activeInterim = ""
+								} else {
+									activeInterim = clean
+								}
+							} else if res.SpeechFinal {
+								lastSpeechActivity = time.Now()
+							}
+
+							// Accumulate full transcript for the current candidate turn
+							var parts []string
+							for _, p := range committedPhrases {
+								parts = append(parts, p)
+							}
+							if activeInterim != "" {
+								parts = append(parts, activeInterim)
+							}
+							fullText := strings.TrimSpace(strings.Join(parts, " "))
+							turnAccMu.Unlock()
+
+							if fullText != "" {
 								send(WSMessage{
 									Type:    "interim_transcript",
-									Text:    res.Text,
+									Text:    fullText,
 									IsFinal: res.IsFinal,
 								})
 								if clean != "" {
-									lastInterimMu.Lock()
-									lastInterimText = clean
-									lastInterimTime = time.Now()
-									lastInterimMu.Unlock()
-
 									if tc.isSpeaking() && !isFillerOnly(clean) {
 										tc.interrupt()
 										send(WSMessage{
@@ -491,8 +539,13 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 											Turn: int(curTurn.Load()),
 										})
 									}
-									h.ragPrefetcher.TriggerPrefetch(ctx, interviewID, docketID,
-										int(curTurn.Load())+1, res.Text)
+									if h.ragPrefetcher != nil {
+										h.ragPrefetcher.TriggerPrefetch(ctx, interviewID, docketID,
+											int(curTurn.Load())+1, fullText)
+									}
+									if h.voiceDebug {
+										slog.Info("voice_hop: stt_interim", "turn", curTurn.Load()+1, "text", fullText)
+									}
 								}
 							}
 						}
@@ -515,7 +568,11 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 	if len(sess.ConversationHistory) == 0 {
 		sess.TurnNumber = 1
 		curTurn.Store(1)
-		initialPrompt := "You are conducting an interview. Welcome the candidate warmly, introduce yourself briefly as the AI interviewer, and ask the first interview question to get started. IMPORTANT: Do NOT use any markdown formatting - no asterisks, no bold, no bullet points, no hashtags. Speak in plain conversational sentences only. Keep your response strictly under 3 sentences."
+		roleTitle := sess.Docket.Title
+		if roleTitle == "" {
+			roleTitle = "Technical Assessment"
+		}
+		initialPrompt := fmt.Sprintf("Candidate has entered the stage for the %s assessment. Introduce yourself as Voxi, explain the interview purpose and conversational format, and invite the candidate to introduce themselves.", roleTitle)
 		initialHistory := []model.Message{
 			{Role: "participant", Content: initialPrompt},
 		}
@@ -527,7 +584,7 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 			turnCtx, turnCancel := tc.startTurn()
 			defer turnCancel()
 			defer tc.done()
-			if err := h.sendAITurn(turnCtx, send, sess, 1, buildSystemPrompt(&sess.Docket, initialHistory, "", "", ""), initialHistory); err != nil && !errors.Is(err, context.Canceled) {
+			if err := h.sendAITurn(turnCtx, send, sess, 1, buildIntroSystemPrompt(&sess.Docket), initialHistory); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("initial assessor turn failed", "interview_id", interviewID, "error", err)
 				sendError("INTERNAL_ERROR", "Internal server error")
 			}
@@ -573,8 +630,12 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 				// from the interim-transcript prefetch cache when available.
 				ragCh := make(chan string, 1)
 				go func(finalText string, n int) {
-					ragCtx, _ := h.ragPrefetcher.GetContext(ctx, interviewID, docketID, n, finalText)
-					ragCh <- ragCtx
+					if h.ragPrefetcher != nil {
+						ragCtx, _ := h.ragPrefetcher.GetContext(ctx, interviewID, docketID, n, finalText)
+						ragCh <- ragCtx
+					} else {
+						ragCh <- ""
+					}
 				}(text, turn)
 
 				// 1. Update the coverage matrix from the participant's answer.
@@ -693,15 +754,44 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 				})
 			}
 
+		case "finish_turn", "candidate_done_speaking":
+			if !tc.isSpeaking() {
+				turnAccMu.Lock()
+				var parts []string
+				for _, p := range committedPhrases {
+					parts = append(parts, p)
+				}
+				if activeInterim != "" {
+					parts = append(parts, activeInterim)
+				}
+				fullCandidateText := strings.TrimSpace(strings.Join(parts, " "))
+				hasSpoken := len(strings.Fields(fullCandidateText)) >= 1 && !isFillerOnly(fullCandidateText)
+				committedPhrases = nil
+				activeInterim = ""
+				speechActive = false
+				turnAccMu.Unlock()
+
+				if hasSpoken {
+					target := curTurn.Load() + 1
+					if commitTurn(fullCandidateText, target) {
+						slog.Info("manual finish_turn committed speech turn",
+							"interview_id", interviewID, "turn", target, "text", fullCandidateText)
+					}
+				}
+			}
+
 		case "reset_session":
 			slog.Info("reset_session requested", "interview_id", interviewID)
 			tc.interrupt()
 			turnCommitMu.Lock()
 			lastCommittedTurn = 0
 			turnCommitMu.Unlock()
-			lastInterimMu.Lock()
-			lastInterimText = ""
-			lastInterimMu.Unlock()
+			turnAccMu.Lock()
+			committedPhrases = nil
+			activeInterim = ""
+			speechActive = false
+			turnAccMu.Unlock()
+			turnWg.Wait()
 			_ = h.sessMgr.DeleteSession(ctx, interviewID)
 			if h.dbPool != nil {
 				_, dbErr := h.dbPool.Exec(ctx,
@@ -728,7 +818,11 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 			})
 
 			// Trigger fresh initial greeting turn
-			initialPrompt := "You are conducting an interview. Welcome the candidate warmly, introduce yourself briefly as the AI interviewer, and ask the first interview question to get started. IMPORTANT: Do NOT use any markdown formatting - no asterisks, no bold, no bullet points, no hashtags. Speak in plain conversational sentences only. Keep your response strictly under 3 sentences."
+			roleTitle := sess.Docket.Title
+			if roleTitle == "" {
+				roleTitle = "Technical Assessment"
+			}
+			initialPrompt := fmt.Sprintf("Candidate has entered the stage for the %s assessment. Introduce yourself as Voxi, explain the interview purpose and conversational format, and invite the candidate to introduce themselves.", roleTitle)
 			initialHistory := []model.Message{
 				{Role: "participant", Content: initialPrompt},
 			}
@@ -738,7 +832,7 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 				turnCtx, turnCancel := tc.startTurn()
 				defer turnCancel()
 				defer tc.done()
-				if err := h.sendAITurn(turnCtx, send, sess, 1, buildSystemPrompt(&sess.Docket, initialHistory, "", "", ""), initialHistory); err != nil && !errors.Is(err, context.Canceled) {
+				if err := h.sendAITurn(turnCtx, send, sess, 1, buildIntroSystemPrompt(&sess.Docket), initialHistory); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Error("reset greeting turn failed", "interview_id", interviewID, "error", err)
 				}
 			}()
@@ -853,10 +947,19 @@ func (h *WebSocketHandler) sendAITurn(ctx context.Context, send func(WSMessage),
 		Turn:     turnNum,
 	})
 
+	if h.voiceDebug {
+		slog.Info("voice_hop: llm_start", "turn", turnNum)
+	}
+
 	streamChan := make(chan string, 100)
+	llmErrChan := make(chan error, 1)
 	go func() {
 		defer close(streamChan)
-		_ = h.llmPool.GenerateResponse(ctx, systemPrompt, history, streamChan)
+		err := h.llmPool.GenerateResponse(ctx, systemPrompt, history, streamChan)
+		if err != nil && ctx.Err() == nil {
+			slog.Error("llm streaming response failed", "turn", turnNum, "error", err)
+			llmErrChan <- err
+		}
 	}()
 
 	var fullText strings.Builder
@@ -992,7 +1095,12 @@ func (h *WebSocketHandler) sendAITurn(ctx context.Context, send func(WSMessage),
 
 done:
 	if fullText.Len() == 0 {
-		return errors.New("empty LLM response")
+		select {
+		case err := <-llmErrChan:
+			return fmt.Errorf("llm generation failed: %w", err)
+		default:
+			return errors.New("empty LLM response")
+		}
 	}
 
 	sess.ConversationHistory = append(sess.ConversationHistory, model.Message{
@@ -1039,37 +1147,92 @@ func (h *WebSocketHandler) publishCompleted(ctx context.Context, sessionID, orgI
 	}
 }
 
-// buildSystemPrompt renders the static blueprint prompt and, when present,
-// appends the RAG context and the adaptive CURRENT FOCUS directive.
-func buildSystemPrompt(docket *model.Docket, _ []model.Message,
+// buildIntroSystemPrompt generates the system prompt for the orientation/introductory turn (Turn 1).
+func buildIntroSystemPrompt(docket *model.Docket) string {
+	roleTitle := docket.Title
+	if roleTitle == "" {
+		roleTitle = "Technical Assessment"
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("You are Voxi, an advanced autonomous technical voice interviewer conducting an assessment for the %q position.\n\n", roleTitle))
+	sb.WriteString("YOUR OBJECTIVE FOR THIS INITIAL TURN:\n" +
+		"1. Warmly welcome the candidate and introduce yourself as Voxi.\n" +
+		fmt.Sprintf("2. Explain that today's session is an assessment for the %q role, designed to explore their hands-on architecture, engineering decisions, and practical problem-solving.\n", roleTitle) +
+		"3. Explain the pattern of the interview: this is an interactive, conversational technical dialogue where questions adapt dynamically; they can speak naturally, take their time, and interrupt you at any point.\n" +
+		"4. Conclude by inviting the candidate to introduce themselves: ask them to share a brief background about who they are and what technical projects or systems they have been building recently.\n" +
+		"5. STRICT RULE: Do NOT ask any technical questions or rubric questions yet in this turn. Focus solely on introduction, setting expectations, and inviting their self-introduction.\n\n" +
+		"CRITICAL VOICE & BREVITY CONSTRAINTS:\n" +
+		"- Never use markdown formatting in your responses. No asterisks, no bold, no bullet points, no hashtags, no backticks. Respond in plain conversational spoken sentences only.\n" +
+		"- Speak warmly, clearly, and concisely in 3 to 4 spoken sentences.\n")
+	return sb.String()
+}
+
+// buildSystemPrompt renders the dynamic project-centric assessment prompt leveraging
+// candidate projects, docket instructions, rubric criteria, and adaptive directives.
+func buildSystemPrompt(docket *model.Docket, history []model.Message,
 	focusName, focusDesc, ragContext string) string {
 	var sb strings.Builder
-	sb.WriteString("You are conducting a professional job interview.\n\n")
+	roleTitle := docket.Title
+	if roleTitle == "" {
+		roleTitle = "Technical Assessment"
+	}
+	sb.WriteString(fmt.Sprintf("You are Voxi, an elite autonomous technical voice interviewer conducting an in-depth assessment for the %q position.\n\n", roleTitle))
+
+	sb.WriteString("CORE INTERVIEW DIRECTIVE & CANDIDATE PROJECT CENTRICITY:\n" +
+		"- GROUND QUESTIONS IN THE CANDIDATE'S PROJECTS: The candidate's self-introduction and the specific systems or projects they describe are the primary technical basis for this assessment. Listen attentively to their background.\n" +
+		"- DYNAMICALLY ADAPT: Do NOT read question prompts like an inflexible textbook robot. Instead, frame your technical inquiries around the candidate's actual projects and architectures (for example, connect the topic of caching, message queues, concurrency, or consensus to the projects the candidate built).\n" +
+		"- DIALECTIC PROBING: When the candidate answers, follow up on their specific engineering trade-offs ('Why did you choose that approach?', 'What failure modes did you consider?', 'How did it perform under peak load?').\n" +
+		"- NEVER ANSWER YOUR OWN QUESTIONS: You are the interviewer, NOT the candidate or an instructor. Never explain the answers or lecture the candidate.\n\n")
+
+	if len(history) <= 2 {
+		sb.WriteString("STAGE NOTE (Turn 2 - First Technical Inquiry):\n" +
+			"The candidate has just introduced themselves and their projects. Warmly acknowledge the specific projects or technologies they shared in 1 short sentence, and then ask your first technical question directly probing the architecture, trade-offs, or implementation challenges of their projects, aligning with the assessment blueprint.\n\n")
+	} else {
+		sb.WriteString("STAGE NOTE (Follow-up Turn):\n" +
+			"Acknowledge the candidate's last answer and follow up on the engineering trade-offs, edge cases, or transition smoothly to assess the next competency in their project context.\n\n")
+	}
+
 	if docket.Instructions != "" {
-		sb.WriteString("Instructions:\n")
+		sb.WriteString("Hiring Manager Instructions & Focus Guidelines:\n")
 		sb.WriteString(docket.Instructions)
 		sb.WriteString("\n\n")
 	}
-	if len(docket.Questions) > 0 {
-		sb.WriteString("Interview Questions to cover:\n")
-		for i, q := range docket.Questions {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, q.QuestionText))
+
+	if len(docket.Rubric) > 0 {
+		sb.WriteString("Core Evaluation Criteria (Competencies to Probe):\n")
+		for _, r := range docket.Rubric {
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", r.Name, r.Description))
 		}
 		sb.WriteString("\n")
 	}
-	if ragContext != "" {
-		sb.WriteString(ragContext)
+
+	if len(docket.Questions) > 0 {
+		sb.WriteString("Blueprint Inquiry Themes & Core Questions (Use as thematic guides tailored to the candidate's projects, NOT a rigid script):\n")
+		for i, q := range docket.Questions {
+			hint := ""
+			if q.FollowUpHint != nil && *q.FollowUpHint != "" {
+				hint = fmt.Sprintf(" (Probe angle: %s)", *q.FollowUpHint)
+			}
+			sb.WriteString(fmt.Sprintf("%d. %s%s\n", i+1, q.QuestionText, hint))
+		}
 		sb.WriteString("\n")
 	}
+
+	if ragContext != "" {
+		sb.WriteString("Retrieved Knowledge Base Context:\n")
+		sb.WriteString(ragContext)
+		sb.WriteString("\n\n")
+	}
+
 	if focusName != "" {
 		sb.WriteString(fmt.Sprintf(
-			"CURRENT FOCUS: The participant has not yet adequately demonstrated "+
-				"[%s] (%s). Your next question MUST probe this competency specifically.\n\n",
+			"CURRENT ADAPTIVE FOCUS: The candidate has not yet demonstrated sufficient depth in [%s] (%s). Your next question MUST probe this competency within their project context.\n\n",
 			focusName, focusDesc))
 	}
+
 	sb.WriteString("CRITICAL VOICE & BREVITY CONSTRAINTS:\n" +
 		"- Never use markdown formatting in your responses. No asterisks, no bold, no bullet points, no hashtags, no backticks. Respond in plain conversational spoken sentences only.\n" +
-		"- BREVITY IS MANDATORY: Speak strictly 2 to 3 concise sentences (under 45 words total). Keep questions clear, focused, and conversational. Do NOT give long preambles, explanations, or multiple sub-questions.\n")
+		"- BREVITY IS MANDATORY: Speak strictly 2 to 3 concise sentences (under 45 words total). Keep questions clear, focused, and conversational so the candidate has the floor.\n")
 	return sb.String()
 }
 

@@ -8,7 +8,7 @@ This document details the architecture, reliability controls, and evidence verif
 
 ```mermaid
 flowchart TD
-    CompleteTrigger["Interview Completed Trigger<br/>(Kafka: interview.completed / Postgres: outbox_completed)"] --> Worker["evaluation-worker"]
+    CompleteTrigger["Interview Completed Trigger<br/>(PostgreSQL Outbox: outbox_completed)"] --> Worker["evaluation-worker"]
 
     subgraph Phase1["Phase 1: Ingestion & Integrity Validation"]
         Worker --> ReadTranscript["Fetch Candidate Transcript"]
@@ -53,18 +53,17 @@ flowchart TD
 
 ## 2. Key Architecture Pillars & Engineering Controls
 
-### A. Dual-Broker Ingestion (Kafka & Outbox)
-- **Local Dev / Cloud**: Consumes from Kafka topic `interview.completed` with group ID `evaluation-worker-group`.
-- **Resource-Constrained Deployments**: If `KAFKA_BROKERS` is unset, the worker polls PostgreSQL:
-  ```sql
-  SELECT id, session_id, org_id, retry_count
-  FROM outbox_completed
-  WHERE status = 'pending'
-  ORDER BY created_at ASC
-  LIMIT 1
-  FOR UPDATE SKIP LOCKED;
-  ```
-  `FOR UPDATE SKIP LOCKED` guarantees zero lock contention across concurrent workers and provides at-least-once delivery semantics.
+### A. PostgreSQL Outbox Ingestion (`outbox_completed`)
+The evaluation worker polls PostgreSQL outbox tables using `FOR UPDATE SKIP LOCKED`, eliminating the need for standalone Kafka brokers:
+```sql
+SELECT id, session_id, org_id, retry_count
+FROM outbox_completed
+WHERE status = 'pending'
+ORDER BY created_at ASC
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+```
+`FOR UPDATE SKIP LOCKED` guarantees zero lock contention across concurrent workers and provides at-least-once delivery semantics without head-of-line blocking.
 
 ### B. Transcript Completeness Barrier (`ValidateTranscriptCompleteness`)
 - **Race Condition**: When an interview completes, the orchestrator publishes the final turn and the completion trigger almost simultaneously. If the evaluation worker processes the completion event before the turn projector has finished writing the last turn, an incomplete transcript would be evaluated.

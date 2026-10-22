@@ -74,7 +74,7 @@ export interface Blueprint {
   job_id?: string;
   track_id?: string;
   title: string;
-  instructions: string;
+  instructions?: string;
   duration_mins: number;
   questions?: QuestionPrompt[];
   prompts?: QuestionPrompt[];
@@ -126,6 +126,13 @@ export interface InviteValidation {
   blueprint_title?: string;
   duration_mins?: number;
   expires_at?: string;
+}
+
+export interface PublicTrackResponse {
+  track: Track;
+  blueprint_id?: string;
+  blueprint_title?: string;
+  duration_mins?: number;
 }
 
 export interface SessionTurn {
@@ -204,7 +211,9 @@ async function request<T>(
     } catch {
       // Body not JSON
     }
-    throw new Error(errorMsg);
+    const error: any = new Error(errorMsg);
+    error.status = res.status;
+    throw error;
   }
 
   if (res.status === 204) {
@@ -214,11 +223,67 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
+function normalizeSessionItem(item: any): SessionItem {
+  if (!item) return item;
+  return {
+    id: item.id || "",
+    participant_id: item.candidate?.id || item.participant_id || "",
+    participant_name: item.candidate?.full_name || item.participant_name || "Candidate",
+    participant_email: item.candidate?.email || item.participant_email || "",
+    track_id: item.docket?.job_role_id || item.track_id || "",
+    track_title: item.docket?.title || item.track_title || "Technical Track",
+    blueprint_id: item.docket?.id || item.blueprint_id || "",
+    blueprint_title: item.docket?.title || item.blueprint_title || "Technical Assessment Blueprint",
+    status: item.status || "invited",
+    turn_count: item.turn_count || 0,
+    score: item.feedback?.overall_score ?? item.score,
+    recommendation: item.feedback?.recommendation || item.recommendation,
+    started_at: item.started_at,
+    completed_at: item.completed_at,
+    created_at: item.created_at,
+  };
+}
+
+function normalizeEvaluationReport(raw: any, sessionId: string): EvaluationReport {
+  const scores = raw.scores || raw.criteria_results || [];
+  const criteriaResults: CriterionResult[] = scores.map((s: any, idx: number) => {
+    const evidence = s.evidence_quote || s.evidence || undefined;
+    const rawFeedback = s.feedback || "";
+    // Only keep feedback if it is distinct from the raw verbatim evidence quote
+    const feedback = rawFeedback && rawFeedback !== evidence ? rawFeedback : "";
+
+    return {
+      criterion_id: s.criterion_id || s.id || `crit-${idx + 1}`,
+      name: s.criterion_name || s.name || `Criterion #${idx + 1}`,
+      score: s.score ?? 0,
+      max_score: s.max_score ?? 10,
+      feedback: feedback,
+      evidence_quote: evidence,
+      grounded: s.is_grounded ?? s.grounded ?? true,
+    };
+  });
+
+  return {
+    id: raw.id || "",
+    session_id: sessionId,
+    participant_name: raw.participant_name || raw.candidate?.full_name || "",
+    overall_score: raw.overall_score ?? 0,
+    recommendation: raw.recommendation || "revisit",
+    summary: raw.summary || "",
+    criteria_results: criteriaResults,
+    created_at: raw.created_at,
+  };
+}
+
 export const api = {
   // Auth Token Management
   getToken(): string | null {
     if (typeof window === "undefined") return null;
     return localStorage.getItem(TOKEN_KEY);
+  },
+  isAuthenticated(): boolean {
+    if (typeof window === "undefined") return false;
+    return !!localStorage.getItem(TOKEN_KEY);
   },
   getUser(): User | null {
     if (typeof window === "undefined") return null;
@@ -417,7 +482,21 @@ export const api = {
     );
   },
 
-  // Public / Unauthenticated Invite Validation
+  // Public / Unauthenticated Candidate Application & Validation
+  async getPublicTrack(trackId: string): Promise<PublicTrackResponse> {
+    return await request<PublicTrackResponse>(`/api/v1/public/tracks/${trackId}`);
+  },
+
+  async publicApply(
+    trackId: string,
+    payload: { full_name: string; email: string }
+  ): Promise<InviteResponse> {
+    return await request<InviteResponse>(`/api/v1/public/tracks/${trackId}/apply`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
   async validateInvite(token: string): Promise<InviteValidation> {
     return await request<InviteValidation>(`/api/v1/invites/validate/${encodeURIComponent(token)}`);
   },
@@ -437,14 +516,16 @@ export const api = {
     if (params?.limit) searchParams.set("limit", String(params.limit));
 
     const qs = searchParams.toString() ? `?${searchParams.toString()}` : "";
-    const res = await request<{ sessions?: SessionItem[]; interviews?: SessionItem[] }>(
+    const res = await request<{ sessions?: any[]; interviews?: any[] }>(
       `/api/v1/sessions${qs}`
     );
-    return res.sessions || res.interviews || [];
+    const list = res.sessions || res.interviews || [];
+    return list.map(normalizeSessionItem);
   },
 
   async getSession(id: string): Promise<SessionItem> {
-    return await request<SessionItem>(`/api/v1/sessions/${id}`);
+    const item = await request<any>(`/api/v1/sessions/${id}`);
+    return normalizeSessionItem(item);
   },
 
   async getSessionTurns(id: string): Promise<SessionTurn[]> {
@@ -453,8 +534,16 @@ export const api = {
   },
 
   // Evaluation Dossier
-  async getSessionEvaluation(id: string): Promise<EvaluationReport> {
-    return await request<EvaluationReport>(`/api/v1/sessions/${id}/evaluation`);
+  async getSessionEvaluation(id: string): Promise<EvaluationReport | null> {
+    try {
+      const raw = await request<any>(`/api/v1/sessions/${id}/evaluation`);
+      return normalizeEvaluationReport(raw, id);
+    } catch (err: any) {
+      if (err?.status === 404 || (typeof err?.message === "string" && err.message.includes("404"))) {
+        return null;
+      }
+      throw err;
+    }
   },
 
   async enqueueEvaluation(id: string): Promise<{ status: string }> {

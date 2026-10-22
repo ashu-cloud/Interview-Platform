@@ -4,9 +4,9 @@
 
 The **Assessment Engine** is a low-latency, real-time adaptive voice assessment platform. It conducts structured technical and behavioral evaluations over streaming audio, continuously tracks competency coverage across live conversational turns, dynamically guides LLM prompting to explore uncovered criteria, and asynchronously produces evidence-grounded evaluation reports citing exact conversation turns.
 
-The platform is designed to operate seamlessly across two distinct runtime environments:
-1. **Local Development**: Standard distributed microservices orchestrated via Docker Compose using Kafka, PostgreSQL with `pgvector`, Redis, and MinIO object storage.
-2. **Resource-Constrained Cloud Deployment (Railway Free Tier)**: Consolidated 3-service deployment utilizing a lightweight PostgreSQL Outbox pattern (`FOR UPDATE SKIP LOCKED`) in place of Kafka, Neon Postgres, Upstash Redis, and Cloudflare R2 object storage.
+The platform employs a unified, zero-broker architecture:
+- **Real-Time Voice Critical Path**: Sub-second full-duplex WebSocket connections terminated by `interview-orchestrator`, leveraging in-memory state in Redis, streaming STT via Deepgram, streaming LLM via Groq, pipelined sentence TTS via ElevenLabs, and pre-roll audio filtering.
+- **Transactional Outbox Event Bus**: Microservices decouple state through PostgreSQL outbox tables (`outbox_turns`, `outbox_completed`) polled with `FOR UPDATE SKIP LOCKED`. This eliminates Kafka operational and RAM overhead, providing strict ordering and idempotency across both local development and cloud production deployments.
 
 ---
 
@@ -18,52 +18,49 @@ The system decouples real-time audio interaction from persistence and evaluation
 +--------------------------------------------------------------------------------------------------+
 | TRACK 1: LIVE CRITICAL PATH (Sub-second, in-memory, non-blocking)                               |
 |                                                                                                  |
-| [Participant] <--- WebSocket ---> [session-runtime]                                              |
-|                                         |                                                        |
-|   +-------------------------------------+---------------------------------------+                |
-|   |                  |                              |                           |                |
-| [Streaming STT]  [Redis State]             [Streaming LLM]               [Streaming TTS]         |
-| (Deepgram Nova-2) (Context / Locks)   (Groq / Llama / Demo Provider)   (ElevenLabs Turbo)        |
+| [Candidate Browser] <--- Full-Duplex PCM WebSocket ---> [interview-orchestrator (:8004)]        |
+|                                                                 |                                |
+|        +-------------------------+------------------------------+--------------------+           |
+|        |                         |                              |                    |           |
+|  [Streaming STT]       [Speculative Prefetch]            [Streaming LLM]       [Streaming TTS]   |
+| (Deepgram Nova-2)      (pgvector + Redis Cache)        (Groq Llama 3.3 70B)  (ElevenLabs Turbo)  |
 +--------------------------------------------------------------------------------------------------+
-                                          |
-                      (Non-blocking async fire-and-forget)
-                                          |
-                                          v
+                                           |
+                       (Non-blocking transactional outbox persistence)
+                                           |
+                                           v
 +--------------------------------------------------------------------------------------------------+
 | TRACK 2: ASYNC PROJECTION & EVALUATION PATH (ACID, idempotent, latency-tolerant)                |
 |                                                                                                  |
-| Local Mode (KAFKA_BROKERS set):                                                                  |
-|   session-runtime ---> Kafka [session.turns]     ---> [turn-projector]   ---> [session_turns]    |
-|   session-runtime ---> Kafka [session.completed] ---> [evaluation-worker] ---> [evaluation_reports]|
+| PostgreSQL Outbox Pattern (FOR UPDATE SKIP LOCKED):                                             |
 |                                                                                                  |
-| Deployed Outbox Mode (KAFKA_BROKERS unset):                                                      |
-|   session-runtime ---> Postgres [outbox_turns]     ---> [turn-projector]   ---> [session_turns]  |
-|   session-runtime ---> Postgres [outbox_completed] ---> [evaluation-worker] ---> [evaluation_reports]|
+|   interview-orchestrator ---> Postgres [outbox_turns]     ---> [Embedded Turn Projector]        |
+|                                                                 (in job-candidate-service)       |
+|                                                                 └──► [session_turns]             |
+|                                                                                                  |
+|   interview-orchestrator ---> Postgres [outbox_completed] ---> [feedback-worker]                 |
+|                                                                 └──► [evaluations]               |
 +--------------------------------------------------------------------------------------------------+
 ```
 
 ### Track 1: Live Critical Path
-- **Sub-second latency constraint**: Time from participant speech end to assessor audio playback target is sub-second.
+- **Sub-second latency constraint**: Time from participant speech end to assessor audio playback target is sub-second (p50: 273.7ms).
 - **In-memory state**: During an active turn, state resides strictly in Redis (`session:state:{id}` and distributed locks `session:lock:{id}`).
-- **Zero blocking database writes**: The critical WebSocket loop never awaits disk I/O or database transactions. Turn events and audio recordings are dispatched via background goroutines and buffered channels.
+- **Zero blocking database writes**: The critical WebSocket loop never awaits disk I/O or heavy database transactions. Turn events are recorded via background goroutines and non-blocking outbox insertion.
+- **Audio Conditioning**: Browser-side anti-aliased downsampling (16kHz PCM) and ~250ms circular audio pre-roll buffer prevent initial phoneme clipping.
 
 ### Track 2: Async Projection & Evaluation Path
-- **Turn Projection**: Consumes individual conversation turns, validates payload models, and performs idempotent writes into the `session_turns` table.
-- **Evaluation Generation**: Upon session completion, the evaluation worker processes the transcript, generates scoring rubrics via parallel LLM evaluation, and records reports into `evaluation_reports` and `evaluation_scores`.
+- **Embedded Turn Projection**: The `job-candidate-service` embeds a concurrent turn projector polling `outbox_turns` every 500ms, validating payload models and performing idempotent writes into the `session_turns` table.
+- **Evaluation Generation**: Upon session completion, `feedback-worker` polls `outbox_completed`, processes the transcript, generates scoring rubrics via parallel LLM evaluation, and records reports into `evaluations` and `evaluation_criteria_results`.
 
 ---
 
 ## 3. Event Bus & The PostgreSQL Outbox Pattern
 
-To eliminate the heavy RAM requirements of running managed or self-hosted Kafka brokers in lightweight production deployments (e.g. Railway's 512MB RAM free tier limit), the engine implements a zero-broker outbox pattern that provides identical logical delivery and ordering guarantees.
-
-### Automatic Broker Selection
-The runtime and worker components detect broker configuration automatically at startup:
-- `KAFKA_BROKERS` is non-empty $\rightarrow$ **Kafka Mode** (publishes to `session.turns` and `session.completed`).
-- `KAFKA_BROKERS` is empty/unset $\rightarrow$ **PostgreSQL Outbox Mode** (publishes to `outbox_turns` and `outbox_completed`).
+To eliminate the operational complexity and heavy RAM requirements of Kafka brokers, the platform utilizes an ACID-compliant PostgreSQL outbox pattern that guarantees message delivery and strict ordering.
 
 ### Outbox Dequeue Mechanics
-Turn projectors and evaluation workers running in Outbox mode poll the database on a configurable interval (default: 500ms):
+The embedded turn projector and evaluation workers poll the database on a configurable interval (default: 500ms):
 
 ```sql
 SELECT id, session_id, org_id, turn_number, role, content, retry_count
@@ -75,14 +72,14 @@ FOR UPDATE SKIP LOCKED;
 ```
 
 #### Key Guarantees:
-1. **Concurrency Safety (`FOR UPDATE SKIP LOCKED`)**: When multiple worker instances or goroutines poll concurrently, locked rows are skipped without blocking or serialization deadlocks.
+1. **Concurrency Safety (`FOR UPDATE SKIP LOCKED`)**: Multiple worker instances or goroutines poll concurrently without row contention, blocking, or serialization deadlocks.
 2. **Idempotent Ingestion**: Projected rows write to `session_turns` with unique constraints:
    ```sql
    INSERT INTO session_turns (session_id, org_id, turn_number, role, content)
    VALUES ($1, $2, $3, $4, $5)
    ON CONFLICT (session_id, turn_number, role) DO NOTHING;
    ```
-3. **Atomic State Transition**: Rows are updated to `status = 'completed'` or given an incremented `retry_count` in the same transaction or immediately upon completion.
+3. **Atomic State Transition**: Rows are updated to `status = 'completed'` in the same transaction or immediately upon completion.
 4. **Bounded Retries & Poison Pill Defense**: Messages exceeding the max retry limit (default: 5) transition to `status = 'failed'` to avoid head-of-line blocking.
 
 ---
@@ -98,144 +95,80 @@ FOR UPDATE SKIP LOCKED;
                               |
             +-----------------+-----------------+
             |                                   |
-    +-------v-------+                   +-------v-------+
-    |     users     |                   | assessment_   |
-    +---------------+                   |    tracks     |
-                                        +-------+-------+
+            v                                   v
++-----------------------+           +-----------------------+
+|         users         |           |   assessment_tracks   |
+|   (Hiring Managers)   |           |      (Job Roles)      |
++-----------------------+           +-----------+-----------+
                                                 |
-                                        +-------v-------+
-                                        |  assessment_  |
-                                        |  blueprints   |
-                                        +---+-------+---+
-                                            |       |
-            +-------------------------------+       +-------------------------------+
-            |                                                                       |
-    +-------v---------------+                                               +-------v---------------+
-    |   blueprint_prompts   |                                               |  evaluation_criteria  |
-    | (embedding vector768) |                                               | (embedding vector768) |
-    +-----------------------+                                               +-----------------------+
-                                                |
-                                        +-------v-------+
-                                        |  participants |
-                                        +-------+-------+
-                                                |
-                                        +-------v-------+
-                                        |  assessment_  |
-                                        |    invites    |
-                                        +-------+-------+
-                                                |
-                                        +-------v-------+
-                                        |  assessment_  |
-                                        |   sessions    |
-                                        +---+-------+---+
-                                            |       |
-            +-------------------------------+       +-------------------------------+
-            |                                                                       |
-    +-------v-------+                                                       +-------v-------+
-    | session_turns |                                                       |  evaluation_  |
-    | (projected)   |                                                       |    reports    |
-    +---------------+                                                       +-------+-------+
-            |                                                                       |
-    +-------v-------+                                                       +-------v-------+
-    |     audio_    |                                                       |  evaluation_  |
-    |  recordings   |                                                       |    scores     |
-    +---------------+                                                       +---------------+
+                                    +-----------+-----------+
+                                    |                       |
+                                    v                       v
+                        +-----------------------+   +---------------+
+                        | assessment_blueprints |   |  participants |
+                        +-----------+-----------+   +-------+-------+
+                                    |                       |
+            +-----------------------+                       |
+            |                       |                       |
+            v                       v                       v
++-----------------------+   +-------------------+   +--------------------+
+|   blueprint_prompts   |   | blueprint_rubrics |   | participant_invites|
+| (Questions / Vectors) |   | (Criteria/Vectors)|   +---------+----------+
++-----------------------+   +-------------------+             |
+                                                              v
+                                                    +--------------------+
+                                                    | interview_sessions |
+                                                    +---------+----------+
+                                                              |
+                                            +-----------------+-----------------+
+                                            |                                   |
+                                            v                                   v
+                                +-----------------------+           +-----------------------+
+                                |     session_turns     |           |      evaluations      |
+                                |  (Audited Transcript) |           |  (Scored Dossiers)    |
+                                +-----------------------+           +-----------+-----------+
+                                                                                |
+                                                                                v
+                                                                    +-----------------------+
+                                                                    |evaluation_criteria_   |
+                                                                    |        results        |
+                                                                    +-----------------------+
 ```
 
-#### New Phase 1 Foundation Tables:
-- `session_turns`: Authoritative sequential log of participant and assessor utterances per assessment session.
-- `outbox_turns`: Transactional outbox buffer for conversational turn events.
-- `outbox_completed`: Transactional outbox buffer for session completion triggers.
-- `audio_recordings`: Metadata and object storage URIs for recorded session audio chunks.
-- `document_chunks`: Chunks and embeddings for RAG-assisted contextual assessment prompts.
+### Outbox Tables Schema
+- **`outbox_turns`**: Stores serialized participant and assessor turns awaiting projection to `session_turns`.
+- **`outbox_completed`**: Stores completed session notifications awaiting asynchronous evaluation processing.
 
-### Redis Caching & Synchronization Schema
-
-| Key Format | TTL | Purpose |
-|---|---|---|
-| `session:state:{session_id}` | 2 hours | Active session context, conversational turn history, and competency matrix |
-| `session:lock:{session_id}` | 30 seconds (15s heartbeat) | Distributed mutex preventing duplicate active WebSocket sessions |
-| `invite:token:{token}` | Invite expiry | Fast-path invite validation avoiding PostgreSQL lookups during handshake |
-| `rag:prefetch:{session_id}:{turn}` | 30 seconds | Pre-computed relevant knowledge chunks for subsequent LLM turns |
-| `org:connections:{org_id}` | 2 hours | Soft concurrency quota counter per organization |
+### Redis Key Schema
+- `invite:token:{token}`: JSON-cached invite metadata for instant validation (TTL: 7 days).
+- `session:state:{session_id}`: Active session state, turn counters, and conversation history buffer.
+- `session:lock:{session_id}`: Distributed mutex lock preventing duplicate connections (TTL: 30s with 15s heartbeats).
+- `rag:prefetch:{session_id}:{turn}`: Speculatively fetched rubric criteria chunks (TTL: 60s).
 
 ---
 
-## 5. Service Topology & Deployment Mapping
+## 5. Microservices & Deployment Topology
 
-### Local Development Environment (5 Go Services + Supporting Infrastructure)
-- **`platform-service`** (`services/job-candidate-service`, port `8001`): Admin REST API for tracks, blueprints, participants, and invites.
-- **`session-runtime`** (`services/interview-orchestrator`, port `8002`): Live WebSocket assessment engine; STT, LLM, and TTS orchestration.
-- **`turn-projector`** (`services/turn-projector`): Headless worker consuming `session.turns` / `outbox_turns` into `session_turns`.
-- **`evaluation-worker`** (`services/feedback-worker`): Headless worker generating async evaluations.
-- **`notification-service`**: Webhook and email dispatch stub.
-- **Infrastructure Containers**: PostgreSQL 16 (`pgvector`), Redis 7.2, Apache Kafka 3.7, MinIO (`assessment-audio` bucket), Nginx frontend (:8080).
-
-### Railway Free-Tier Deployment (3-Service Consolidation)
-To operate within Railway's 3-service deployment quota without sacrificing architectural boundaries:
-
-1. **`platform` Service**:
-   - Runs `platform-service` HTTP server.
-   - Spawns `turn-projector` worker as a managed background goroutine.
-2. **`runtime` Service**:
-   - Runs `session-runtime` WebSocket server on dedicated persistent connections.
-3. **`evaluation` Service**:
-   - Runs `evaluation-worker` and `notification-service` background processors.
-4. **Cloud Managed Backends**:
-   - Database: Neon Serverless PostgreSQL with `pgvector`.
-   - Redis: Upstash Redis.
-   - Storage: Cloudflare R2 (S3 API compatible).
-   - Frontend: Cloudflare Pages static web application.
+| Service | Directory | Host Port | Protocol | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Frontend Web App** | `frontend/` | `:3000` | HTTP / WS | Next.js 16 App Router UI & Turbopack |
+| **Platform Service** | `services/job-candidate-service` | `:8003` | HTTP REST | Auth, tracks, blueprints, public apply, invites, embedded turn projector |
+| **Session Runtime** | `services/interview-orchestrator` | `:8004` | WebSocket | Real-time voice orchestrator, STT, LLM, TTS, speculative RAG prefetch, `/debug/voice` probe |
+| **Evaluation Worker** | `services/feedback-worker` | — | Outbox Worker | Grounded transcript assessment, rubric grading, JSON repair |
+| **Notification Service** | `services/notification-service` | — | Outbox Worker | Candidate invite and completion notifications via Resend |
 
 ---
 
-## 6. Security & Inter-Service Communication
+## 6. Security & Candidate Access
 
-1. **User / Assessment Author Authentication**:
+1. **Manager Authentication**:
    - Bearer JWT tokens signed with HS256 using `JWT_SECRET`.
-   - Injected in HTTP requests via `Authorization: Bearer <token>`.
-2. **Participant Session Handshake**:
-   - Single-use invite tokens passed in query string `?token=<invite_token>`.
-   - Validated against Redis cache or PostgreSQL `assessment_invites` table.
-3. **Internal Microservice Authentication**:
-   - HTTP requests between services require `X-Internal-Key` header matching `INTERNAL_API_KEY`.
-
----
-
-## 7. Specialized Subsystem Architecture Flows
-
-For in-depth mechanical breakdowns, sequence diagrams, failure modes, and code citations of critical subsystems, consult the following dedicated engineering guides:
-
-1. **[Real-Time Voice Pipeline Flow](voice_pipeline_flow.md)**:
-   - Web Audio PCM binary frame streaming and Deepgram Nova-2 streaming STT.
-   - Pipelined sentence-boundary synthesis (2.8x dead-air reduction: 753.9ms $\to$ 273.7ms).
-   - Barge-in interruption mechanics, context cancellation, and delivered-sentence history truncation.
-   - Turn sequence barriers and Redis distributed locking (`session:lock:{id}`).
-
-2. **[Speculative RAG Retrieval & Prefetch Flow](speculative_retrieval_flow.md)**:
-   - Interim STT triggered prefetch, 768-dim embeddings, pgvector cosine search, and Redis caching.
-   - Latency breakdown: 54.3ms embedding vs 10.5ms pgvector query (p50).
-   - Cache hit vs fallback dynamics (1.15ms cache hit vs 64.8ms cold query fallback).
-   - Architectural defect analysis: 22.2% semantic staleness under topic drift and proposed debounce/invalidation fixes.
-
-3. **[Adaptive Competency Steering](adaptive_competency_steering.md)**:
-   - Mathematical model of the 3-factor evaluation engine (Topic Coverage, Demonstrated Competence, Recency Decay).
-   - Single-mention capping at 0.50 competence and $\ge 2$ substantive turns requirement.
-   - Dynamic `CURRENT FOCUS:` system prompt injection based on maximum coverage deficit.
-
-4. **[Asynchronous Evaluation & Grounding Pipeline](evaluation_and_grounding_flow.md)**:
-   - Kafka and Outbox consumer mechanics with transcript completeness verification barriers.
-   - Bounded-concurrent scatter-gather grading ($N=5$, 5.0x speedup: 502.2ms $\to$ 100.4ms).
-   - Verbatim quote attribution (`IsSubstantiveEvidence`) eliminating stop-token false accepts (80.0% $\to$ 0.0%).
-   - Bounded regex JSON schema repair and failure-preserving score aggregation.
-
----
-
-## 8. Empirical Verification & Benchmarks
-
-The repository includes an automated test and replay suite under `bench/` that empirically verifies latency and reliability invariants:
-- `bench/fair_comparisons_test.go`: Microbenchmarks isolating pipelined synthesis (A), prefetch retrieval (B), and scatter-gather evaluation (C).
-- `bench/prefetch_replay_test.go`: 30-turn 1:1 timeline replay measuring speculative retrieval hit rate, cold query fallback rate, and semantic drift.
-- `services/feedback-worker/internal/worker/grounding_bench_test.go`: Precision/recall verification of evidence quote attribution against adversarial false accepts.
-- `services/interview-orchestrator/internal/adaptive/adaptive_sim_test.go`: Convergence and topic drift ablation across multi-turn conversational transcripts.
-
+   - Required for all track, blueprint, and session management routes.
+2. **Public Candidate Application Flow**:
+   - Candidates self-apply via `POST /api/v1/public/tracks/:job_id/apply` without requiring administrative credentials.
+   - Generates an interview token, initializes the session in `invited` state, and returns `{ token, invite_id, interview_id, invite_link }`.
+3. **Participant Session Handshake**:
+   - Single-use invite tokens passed in query string `?token=<invite_token>` during WebSocket connection.
+   - Fast-path validation against Redis cache with fallback to PostgreSQL.
+4. **Internal Microservice Authentication**:
+   - Service-to-service communication requires the `X-Internal-Key` header matching `INTERNAL_API_KEY`.

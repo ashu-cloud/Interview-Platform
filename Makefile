@@ -1,4 +1,4 @@
-.PHONY: up down migrate logs build test-jcs test-orchestrator test-platform test-runtime test-projector test-evaluation minio-console
+.PHONY: up down migrate logs build test-jcs test-orchestrator test-platform test-runtime test-evaluation minio-console
 
 up:
 	docker compose up -d
@@ -24,9 +24,6 @@ test-orchestrator:
 test-platform: test-jcs
 
 test-runtime: test-orchestrator
-
-test-projector:
-	cd services/turn-projector && go test ./...
 
 test-evaluation:
 	cd services/feedback-worker && go test ./...

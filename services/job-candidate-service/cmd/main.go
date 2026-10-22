@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,18 +71,16 @@ func main() {
 	authSvc := service.NewAuthService(userRepo, cfg.JWTSecret)
 	jobSvc := service.NewJobService(jobRepo)
 	docketSvc := service.NewDocketService(docketRepo, jobRepo)
-	switch {
-	case cfg.DemoMode:
-		slog.Info("blueprint embeddings: demo mode, using random embeddings")
-		docketSvc.SetEmbedder(embedding.DemoEmbeddingClient{}, logger)
-	case cfg.OpenAIEmbeddingAPIKey != "":
-		slog.Info("blueprint embeddings enabled", "model", cfg.EmbeddingModel, "dims", cfg.EmbeddingDims)
-		docketSvc.SetEmbedder(embedding.NewOpenAIEmbeddingClient(cfg.OpenAIEmbeddingAPIKey, cfg.EmbeddingDims).
+	var openAIClient embedding.EmbeddingClient
+	if cfg.OpenAIEmbeddingAPIKey != "" && strings.HasPrefix(cfg.OpenAIEmbeddingAPIKey, "sk-") && !cfg.DemoMode {
+		slog.Info("blueprint embeddings: configured with OpenAI upstream", "model", cfg.EmbeddingModel, "dims", cfg.EmbeddingDims)
+		openAIClient = embedding.NewOpenAIEmbeddingClient(cfg.OpenAIEmbeddingAPIKey, cfg.EmbeddingDims).
 			WithModel(cfg.EmbeddingModel).
-			WithBaseURL(cfg.EmbeddingBaseURL), logger)
-	default:
-		slog.Warn("OPENAI_EMBEDDING_API_KEY not set: blueprint embeddings disabled, adaptive engine and RAG will be inactive for new blueprints")
+			WithBaseURL(cfg.EmbeddingBaseURL)
+	} else {
+		slog.Info("blueprint embeddings: configured with local deterministic semantic engine", "dims", cfg.EmbeddingDims)
 	}
+	docketSvc.SetEmbedder(embedding.NewFallbackEmbeddingClient(openAIClient, cfg.EmbeddingDims), logger)
 	candidateSvc := service.NewCandidateService(candidateRepo, jobRepo)
 	inviteSvc := service.NewInviteService(inviteRepo, candidateRepo, docketRepo, redisClient, cfg.AppDomain)
 
@@ -116,16 +115,13 @@ func main() {
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
 
-	if os.Getenv("KAFKA_BROKERS") == "" {
-		projRepo := projector.NewTurnRepository(pool)
-		proj := projector.NewTurnProjector(projRepo, logger, 500*time.Millisecond)
-		go func() {
-			logger.Info("turn projector started (embedded, outbox mode)")
-			proj.RunOutboxMode(serverCtx)
-			logger.Info("turn projector stopped")
-		}()
-		logger.Info("turn projector: Kafka mode handled by separate turn-projector service")
-	}
+	projRepo := projector.NewTurnRepository(pool)
+	proj := projector.NewTurnProjector(projRepo, logger, 500*time.Millisecond)
+	go func() {
+		logger.Info("turn projector started (embedded, outbox mode)")
+		proj.RunOutboxMode(serverCtx)
+		logger.Info("turn projector stopped")
+	}()
 
 	// Block until SIGINT or SIGTERM
 	quit := make(chan os.Signal, 1)

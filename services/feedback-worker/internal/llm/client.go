@@ -168,19 +168,22 @@ func NewFeedbackLLMClient(apiKey string) *EvaluationLLMClient {
 	return NewEvaluationLLMClient(apiKey)
 }
 
-func NewGroqEvaluationLLMClient(apiKey string) *EvaluationLLMClient {
+func NewGroqEvaluationLLMClient(apiKey, model string) *EvaluationLLMClient {
+	if model == "" {
+		model = "openai/gpt-oss-120b"
+	}
 	return &EvaluationLLMClient{
 		APIKey:  apiKey,
 		BaseURL: "https://api.groq.com/openai/v1/chat/completions",
-		Model:   "llama-3.3-70b-versatile",
+		Model:   model,
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
 	}
 }
 
-func NewGroqFeedbackLLMClient(apiKey string) *EvaluationLLMClient {
-	return NewGroqEvaluationLLMClient(apiKey)
+func NewGroqFeedbackLLMClient(apiKey, model string) *EvaluationLLMClient {
+	return NewGroqEvaluationLLMClient(apiKey, model)
 }
 
 type openaiMessage struct {
@@ -207,7 +210,7 @@ type openaiResponse struct {
 func (c *EvaluationLLMClient) callOpenAI(ctx context.Context, prompt string, temperature float64, jsonObject bool, maxTokens int) (string, error) {
 	modelName := c.Model
 	if modelName == "" {
-		modelName = "llama-3.3-70b-versatile"
+		modelName = "openai/gpt-oss-120b"
 	}
 	baseURL := c.BaseURL
 	if baseURL == "" {

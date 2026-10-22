@@ -14,6 +14,7 @@ type Config struct {
 	JobCandidateServiceURL string
 	InternalAPIKey         string
 	GroqAPIKey             string
+	GroqModel              string
 	LLMMode                string
 }
 
@@ -40,6 +41,11 @@ func Load() (*Config, error) {
 	}
 	llmMode = strings.ToLower(strings.TrimSpace(llmMode))
 
+	groqModel := strings.TrimSpace(os.Getenv("GROQ_MODEL"))
+	if groqModel == "" {
+		groqModel = "openai/gpt-oss-120b"
+	}
+
 	c := &Config{
 		KafkaBrokers:           strings.TrimSpace(os.Getenv("KAFKA_BROKERS")),
 		PollInterval:           pollInterval,
@@ -47,6 +53,7 @@ func Load() (*Config, error) {
 		JobCandidateServiceURL: serviceURL,
 		InternalAPIKey:         os.Getenv("INTERNAL_API_KEY"),
 		GroqAPIKey:             os.Getenv("GROQ_API_KEY"),
+		GroqModel:              groqModel,
 		LLMMode:                llmMode,
 	}
 

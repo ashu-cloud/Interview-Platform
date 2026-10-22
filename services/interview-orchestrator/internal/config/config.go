@@ -27,6 +27,7 @@ type Config struct {
 	MinIOSecretKey         string
 	MinIOBucketAudio       string
 	MinIOUseSSL            bool
+	VoiceDebug             bool
 
 	OpenAIEmbeddingAPIKey string // required unless ASSESSMENT_DEMO_MODE=true
 	EmbeddingModel        string
@@ -42,6 +43,11 @@ func Load() (*Config, error) {
 	minioSecret := strings.TrimSpace(os.Getenv("MINIO_ROOT_PASSWORD"))
 	if minioSecret == "" {
 		minioSecret = strings.TrimSpace(os.Getenv("MINIO_SECRET_KEY"))
+	}
+
+	embKey := strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY"))
+	if embKey == "" {
+		embKey = strings.TrimSpace(os.Getenv("OPENAI_EMBEDDING_API_KEY"))
 	}
 
 	cfg := &Config{
@@ -64,8 +70,9 @@ func Load() (*Config, error) {
 		MinIOSecretKey:         minioSecret,
 		MinIOBucketAudio:       strings.TrimSpace(os.Getenv("MINIO_BUCKET_AUDIO")),
 		MinIOUseSSL:            strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
+		VoiceDebug:             strings.EqualFold(os.Getenv("VOICE_DEBUG"), "true"),
 
-		OpenAIEmbeddingAPIKey: strings.TrimSpace(os.Getenv("OPENAI_EMBEDDING_API_KEY")),
+		OpenAIEmbeddingAPIKey: embKey,
 		EmbeddingModel:        strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
 		EmbeddingBaseURL:      strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
 	}

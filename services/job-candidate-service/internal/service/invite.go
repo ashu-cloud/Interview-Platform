@@ -326,3 +326,52 @@ func (s *InviteService) GetFeedback(
 	}
 	return resp, nil
 }
+
+// GetPublicTrack returns public track details and active blueprint for unauthenticated applicants.
+func (s *InviteService) GetPublicTrack(ctx context.Context, jobID uuid.UUID) (*model.PublicTrackResponse, error) {
+	return s.repo.GetPublicTrack(ctx, jobID)
+}
+
+// PublicApply creates a participant (if not exists) and an interview invite, returning the token.
+func (s *InviteService) PublicApply(
+	ctx context.Context,
+	jobID uuid.UUID,
+	req *model.PublicApplyRequest,
+) (*model.InviteResponse, error) {
+	token := uuid.New().String()
+	expiresAt := time.Now().UTC().Add(7 * 24 * time.Hour)
+
+	invite, interview, orgID, participantID, err := s.repo.PublicApply(ctx, jobID, req, token, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("InviteService.PublicApply: %w", err)
+	}
+
+	ttl := time.Until(expiresAt)
+	cacheVal := model.InviteCacheValue{
+		InviteID:    invite.ID.String(),
+		InterviewID: interview.ID.String(),
+		CandidateID: participantID.String(),
+		DocketID:    invite.DocketID.String(),
+		OrgID:       orgID.String(),
+		ExpiresAt:   expiresAt.Format(time.RFC3339),
+	}
+	if s.redis != nil {
+		if data, err := json.Marshal(cacheVal); err == nil {
+			if redisErr := s.redis.Set(ctx, inviteTokenCacheKeyPrefix+token, data, ttl).Err(); redisErr != nil {
+				slog.Warn("InviteService.PublicApply: failed to cache invite", "token", token, "error", redisErr)
+			}
+		}
+	}
+
+	appDomain := s.appDomain
+	if appDomain == "" {
+		appDomain = "http://localhost:3000"
+	}
+
+	return &model.InviteResponse{
+		InviteID:   invite.ID.String(),
+		InviteLink: fmt.Sprintf("%s/interview/%s", appDomain, token),
+		Token:      token,
+		ExpiresAt:  expiresAt,
+	}, nil
+}

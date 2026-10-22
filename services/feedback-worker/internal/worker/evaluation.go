@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -512,9 +513,22 @@ func (w *EvaluationWorker) generateSummary(ctx context.Context,
 	prompt := fmt.Sprintf(`Write a concise 2-3 paragraph executive summary of this completed technical assessment.
 Summarize the participant's key strengths and demonstrated competencies, cite specific evidence, and explain the %s recommendation.
 
+CRITICAL RULES:
+- Do NOT output any heading or title such as "**Executive Summary**" or "# Executive Summary". Start directly with the first sentence of the assessment narrative.
+- Use standard double quotes for quoting candidate statements (do not wrap quotes with asterisks like "*quote*").
+- Separate paragraphs with blank lines.
+
 %s`, recommendation, sb.String())
 
-	return w.llmClient.GenerateSummary(ctx, prompt)
+	summary, err := w.llmClient.GenerateSummary(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	summary = strings.TrimSpace(summary)
+	// Strip redundant heading if LLM outputs it anyway
+	reTitle := regexp.MustCompile(`(?i)^(?:\*{1,3}|#{1,4})?\s*Executive Summary:?\s*(?:\*{1,3})?\s*`)
+	summary = reTitle.ReplaceAllString(summary, "")
+	return strings.TrimSpace(summary), nil
 }
 
 func (w *EvaluationWorker) publishNotification(ctx context.Context,
