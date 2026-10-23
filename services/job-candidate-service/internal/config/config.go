@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/cache"
 )
 
 // Config holds all configuration read from environment at startup.
@@ -31,7 +33,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:           getEnv("PORT", "8001"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		RedisURL:       os.Getenv("REDIS_URL"),
+		RedisURL:       cache.CleanRedisURL(os.Getenv("REDIS_URL")),
 		JWTSecret:      os.Getenv("JWT_SECRET"),
 		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
 		AppDomain:      getEnv("APP_DOMAIN", "http://localhost:3000"),

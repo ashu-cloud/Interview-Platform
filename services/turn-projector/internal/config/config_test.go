@@ -34,10 +34,15 @@ func TestModeSelection(t *testing.T) {
 		{"set selects kafka", "kafka:9092", ModeKafka},
 		{"unset selects outbox", "", ModeOutbox},
 		{"blank selects outbox", "   ", ModeOutbox},
+		{"cloud localhost falls back to outbox", "localhost:9092", ModeOutbox},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Load(env(map[string]string{"DATABASE_URL": "postgres://x", "KAFKA_BROKERS": tc.brokers}))
+			m := map[string]string{"DATABASE_URL": "postgres://x", "KAFKA_BROKERS": tc.brokers}
+			if tc.name == "cloud localhost falls back to outbox" {
+				m["RENDER"] = "true"
+			}
+			cfg, err := Load(env(m))
 			if err != nil {
 				t.Fatal(err)
 			}

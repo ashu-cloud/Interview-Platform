@@ -26,8 +26,15 @@ type Config struct {
 
 // Load reads configuration using the supplied lookup function (os.Getenv in production).
 func Load(getenv func(string) string) (*Config, error) {
+	kafkaBrokers := strings.TrimSpace(getenv("KAFKA_BROKERS"))
+	isCloud := getenv("RENDER") != "" || getenv("RAILWAY_ENVIRONMENT") != "" || getenv("FLY_APP_NAME") != ""
+	isLocalhost := strings.Contains(kafkaBrokers, "localhost") || strings.Contains(kafkaBrokers, "127.0.0.1")
+	if strings.EqualFold(getenv("USE_OUTBOX"), "true") || strings.EqualFold(getenv("DISABLE_KAFKA"), "true") || (isCloud && isLocalhost) {
+		kafkaBrokers = ""
+	}
+
 	cfg := &Config{
-		KafkaBrokers: strings.TrimSpace(getenv("KAFKA_BROKERS")),
+		KafkaBrokers: kafkaBrokers,
 		KafkaGroupID: strings.TrimSpace(getenv("KAFKA_GROUP_ID")),
 		KafkaTopic:   strings.TrimSpace(getenv("KAFKA_TOPIC")),
 		DatabaseURL:  strings.TrimSpace(getenv("DATABASE_URL")),

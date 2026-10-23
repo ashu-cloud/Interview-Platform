@@ -50,10 +50,17 @@ func Load() (*Config, error) {
 		embKey = strings.TrimSpace(os.Getenv("OPENAI_EMBEDDING_API_KEY"))
 	}
 
+	kafkaBrokers := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
+	isCloud := os.Getenv("RENDER") != "" || os.Getenv("RAILWAY_ENVIRONMENT") != "" || os.Getenv("FLY_APP_NAME") != ""
+	isLocalhost := strings.Contains(kafkaBrokers, "localhost") || strings.Contains(kafkaBrokers, "127.0.0.1")
+	if strings.EqualFold(os.Getenv("USE_OUTBOX"), "true") || strings.EqualFold(os.Getenv("DISABLE_KAFKA"), "true") || (isCloud && isLocalhost) {
+		kafkaBrokers = ""
+	}
+
 	cfg := &Config{
 		Port:                   os.Getenv("PORT"),
-		RedisURL:               os.Getenv("REDIS_URL"),
-		KafkaBrokers:           strings.TrimSpace(os.Getenv("KAFKA_BROKERS")),
+		RedisURL:               CleanRedisURL(os.Getenv("REDIS_URL")),
+		KafkaBrokers:           kafkaBrokers,
 		KafkaTurnsTopic:        strings.TrimSpace(os.Getenv("KAFKA_TURNS_TOPIC")),
 		KafkaCompletedTopic:    strings.TrimSpace(os.Getenv("KAFKA_COMPLETED_TOPIC")),
 		DatabaseURL:            strings.TrimSpace(os.Getenv("DATABASE_URL")),
@@ -130,4 +137,34 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// CleanRedisURL normalizes a Redis connection string.
+// Handles cases where users paste raw CLI commands copied from provider dashboards
+// (e.g. `redis-cli --tls -u redis://default:xxx@host:6379`), removes quotes,
+// and enforces `rediss://` for Upstash or when TLS was requested.
+func CleanRedisURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.Trim(s, `"'`)
+
+	isTLS := strings.Contains(s, "--tls")
+
+	if idx := strings.Index(s, "rediss://"); idx != -1 {
+		s = s[idx:]
+	} else if idx := strings.Index(s, "redis://"); idx != -1 {
+		s = s[idx:]
+	}
+
+	if endIdx := strings.IndexAny(s, " \t\r\n\"'"); endIdx != -1 {
+		s = s[:endIdx]
+	}
+
+	if strings.HasPrefix(s, "redis://") {
+		lower := strings.ToLower(s)
+		if isTLS || strings.Contains(lower, "upstash.io") {
+			s = "rediss://" + s[len("redis://"):]
+		}
+	}
+
+	return s
 }

@@ -57,4 +57,36 @@ func TestLoadSelectsPublisherConfiguration(t *testing.T) {
 			t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
 		}
 	})
+
+	t.Run("cloud deployment falls back from localhost kafka to outbox", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("RENDER", "true")
+		t.Setenv("KAFKA_BROKERS", "localhost:9092")
+		t.Setenv("DATABASE_URL", "postgres://db")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.KafkaBrokers != "" {
+			t.Fatalf("expected KafkaBrokers to be cleared in cloud when pointing to localhost, got %q", cfg.KafkaBrokers)
+		}
+	})
+
+	t.Run("CleanRedisURL normalizes upstash cli command", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("REDIS_URL", "redis-cli --tls -u redis://default:token@divine-ape-235380.upstash.io:6379")
+		t.Setenv("DATABASE_URL", "postgres://db")
+		t.Setenv("KAFKA_BROKERS", "")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := "rediss://default:token@divine-ape-235380.upstash.io:6379"
+		if cfg.RedisURL != expected {
+			t.Fatalf("expected RedisURL %q, got %q", expected, cfg.RedisURL)
+		}
+	})
 }
+

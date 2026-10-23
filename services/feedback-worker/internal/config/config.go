@@ -46,8 +46,15 @@ func Load() (*Config, error) {
 		groqModel = "openai/gpt-oss-120b"
 	}
 
+	kafkaBrokers := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
+	isCloud := os.Getenv("RENDER") != "" || os.Getenv("RAILWAY_ENVIRONMENT") != "" || os.Getenv("FLY_APP_NAME") != ""
+	isLocalhost := strings.Contains(kafkaBrokers, "localhost") || strings.Contains(kafkaBrokers, "127.0.0.1")
+	if strings.EqualFold(os.Getenv("USE_OUTBOX"), "true") || strings.EqualFold(os.Getenv("DISABLE_KAFKA"), "true") || (isCloud && isLocalhost) {
+		kafkaBrokers = ""
+	}
+
 	c := &Config{
-		KafkaBrokers:           strings.TrimSpace(os.Getenv("KAFKA_BROKERS")),
+		KafkaBrokers:           kafkaBrokers,
 		PollInterval:           pollInterval,
 		DatabaseURL:            os.Getenv("DATABASE_URL"),
 		JobCandidateServiceURL: serviceURL,
