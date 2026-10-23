@@ -117,8 +117,12 @@ func Load() (*Config, error) {
 	if cfg.KafkaBrokers == "" && cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required when KAFKA_BROKERS is not set")
 	}
-	if cfg.JobCandidateServiceURL == "" {
-		return nil, fmt.Errorf("JOB_CANDIDATE_SERVICE_URL is required")
+	if cfg.JobCandidateServiceURL == "" || cfg.JobCandidateServiceURL == "http://localhost:8001" || cfg.JobCandidateServiceURL == "http://job-candidate-service:8001" {
+		if os.Getenv("RENDER") != "" {
+			cfg.JobCandidateServiceURL = "https://voxassess-api.onrender.com"
+		} else if cfg.JobCandidateServiceURL == "" {
+			cfg.JobCandidateServiceURL = "http://localhost:8001"
+		}
 	}
 	if cfg.InternalAPIKey == "" {
 		return nil, fmt.Errorf("INTERNAL_API_KEY is required")

@@ -242,10 +242,17 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 	}
 	slog.Info("validating invite", "token", tokenMask)
 	inviteRes, err := h.jcsClient.ValidateInvite(ctx, token)
-	if err != nil {
-		slog.Error("invite validation failed", "error", err)
-		sendError("INVALID_INVITE", "Invalid or expired invite")
-		return
+	if err != nil || inviteRes == nil || !inviteRes.Valid {
+		if err != nil {
+			slog.Warn("jcs client invite validation failed, attempting database fallback", "token", tokenMask, "error", err)
+		}
+		dbRes, dbErr := h.validateInviteFromDB(ctx, token)
+		if dbErr != nil || dbRes == nil || !dbRes.Valid {
+			slog.Error("all invite validation strategies failed", "token", tokenMask, "jcs_error", err, "db_error", dbErr)
+			sendError("INVALID_INVITE", "Invalid or expired invite")
+			return
+		}
+		inviteRes = dbRes
 	}
 	if !inviteRes.Valid || inviteRes.InterviewStatus == "completed" {
 		sendError("INVALID_INVITE", "Invalid or expired invite")
@@ -294,10 +301,17 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 
 	if sess == nil {
 		docket, err := h.jcsClient.GetDocket(ctx, inviteRes.DocketID)
-		if err != nil {
-			slog.Error("failed to get docket", "error", err)
-			sendError("INTERNAL_ERROR", "Internal server error")
-			return
+		if err != nil || docket == nil || docket.Title == "" {
+			if err != nil {
+				slog.Warn("jcsClient.GetDocket failed, trying db fallback", "docket_id", inviteRes.DocketID, "error", err)
+			}
+			dbDocket, dbErr := h.getDocketFromDB(ctx, inviteRes.DocketID)
+			if dbErr != nil || dbDocket == nil {
+				slog.Error("all get docket strategies failed", "docket_id", inviteRes.DocketID, "error", err, "db_error", dbErr)
+				sendError("INTERNAL_ERROR", "Internal server error")
+				return
+			}
+			docket = dbDocket
 		}
 
 		sess = &model.Session{
@@ -339,7 +353,8 @@ func (h *WebSocketHandler) handleConnection(ctx context.Context, conn *websocket
 
 		_, err = h.jcsClient.UpdateInterviewStatus(ctx, interviewID, "in_progress")
 		if err != nil {
-			slog.Error("update status failed", "error", err)
+			slog.Warn("update status failed via jcs, updating in db directly", "error", err)
+			h.updateInterviewStatusInDB(ctx, interviewID, "in_progress")
 		}
 	}
 
@@ -1244,4 +1259,146 @@ func isFillerOnly(s string) bool {
 	}
 	return fillers[clean]
 }
+
+func (h *WebSocketHandler) validateInviteFromDB(ctx context.Context, token string) (*integration.InviteValidateResponse, error) {
+	if h.dbPool == nil {
+		return nil, fmt.Errorf("database pool not available")
+	}
+
+	var (
+		inviteID        uuid.UUID
+		interviewID     uuid.UUID
+		interviewStatus string
+		candidateID     uuid.UUID
+		docketID        uuid.UUID
+		orgID           uuid.UUID
+		expiresAt       time.Time
+		usedAt          *time.Time
+		candidateName   string
+		candidateEmail  string
+		jobTitle        string
+		docketTitle     string
+	)
+
+	err := h.dbPool.QueryRow(ctx, `
+		SELECT ii.id, i.id, i.status, ii.candidate_id, ii.docket_id, ii.org_id,
+		       ii.expires_at, ii.used_at,
+		       c.full_name, c.email,
+		       jr.title,
+		       d.title
+		FROM assessment_invites ii
+		JOIN assessment_sessions i ON i.invite_id = ii.id
+		JOIN participants c ON c.id = ii.candidate_id
+		JOIN assessment_blueprints d ON d.id = ii.docket_id
+		JOIN assessment_tracks jr ON jr.id = d.job_role_id
+		WHERE ii.token = $1
+	`, token).Scan(
+		&inviteID, &interviewID, &interviewStatus, &candidateID, &docketID, &orgID,
+		&expiresAt, &usedAt,
+		&candidateName, &candidateEmail,
+		&jobTitle,
+		&docketTitle,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if usedAt != nil || interviewStatus == "completed" || interviewStatus == "feedback_ready" || interviewStatus == "evaluation_ready" {
+		return &integration.InviteValidateResponse{Valid: false, InterviewStatus: "completed"}, nil
+	}
+
+	if time.Now().After(expiresAt) {
+		return &integration.InviteValidateResponse{Valid: false}, nil
+	}
+
+	return &integration.InviteValidateResponse{
+		Valid:           true,
+		InterviewID:     interviewID.String(),
+		InterviewStatus: interviewStatus,
+		DocketID:        docketID.String(),
+		OrgID:           orgID.String(),
+		Candidate: integration.InviteValidateCandidate{
+			ID:       candidateID.String(),
+			FullName: candidateName,
+		},
+		JobRole: integration.InviteValidateJobRole{
+			Title: jobTitle,
+		},
+		DocketTitle: docketTitle,
+		ExpiresAt:   expiresAt,
+	}, nil
+}
+
+func (h *WebSocketHandler) getDocketFromDB(ctx context.Context, docketID string) (*model.Docket, error) {
+	if h.dbPool == nil {
+		return nil, fmt.Errorf("database pool not available")
+	}
+
+	parsedID, err := uuid.Parse(docketID)
+	if err != nil {
+		return nil, err
+	}
+
+	docket := &model.Docket{ID: docketID}
+	var systemPrompt string
+	err = h.dbPool.QueryRow(ctx, `
+		SELECT title, instructions, duration_mins, COALESCE(system_prompt, '')
+		FROM assessment_blueprints WHERE id = $1
+	`, parsedID).Scan(&docket.Title, &docket.Instructions, &docket.DurationMins, &systemPrompt)
+	if err != nil {
+		return nil, err
+	}
+
+	qRows, err := h.dbPool.Query(ctx, `
+		SELECT id, question_text, question_type, order_index
+		FROM blueprint_prompts WHERE docket_id = $1 ORDER BY order_index ASC
+	`, parsedID)
+	if err == nil {
+		defer qRows.Close()
+		for qRows.Next() {
+			var q model.DocketQuestion
+			var qID uuid.UUID
+			if scanErr := qRows.Scan(&qID, &q.QuestionText, &q.QuestionType, &q.OrderIndex); scanErr == nil {
+				q.ID = qID.String()
+				docket.Questions = append(docket.Questions, q)
+			}
+		}
+	}
+
+	rRows, err := h.dbPool.Query(ctx, `
+		SELECT id, name, description, max_score
+		FROM evaluation_criteria WHERE docket_id = $1
+	`, parsedID)
+	if err == nil {
+		defer rRows.Close()
+		for rRows.Next() {
+			var r model.RubricCriterion
+			var rID uuid.UUID
+			if scanErr := rRows.Scan(&rID, &r.Name, &r.Description, &r.MaxScore); scanErr == nil {
+				r.ID = rID.String()
+				docket.Rubric = append(docket.Rubric, r)
+			}
+		}
+	}
+
+	return docket, nil
+}
+
+func (h *WebSocketHandler) updateInterviewStatusInDB(ctx context.Context, interviewID string, status string) {
+	if h.dbPool == nil {
+		return
+	}
+	parsedID, err := uuid.Parse(interviewID)
+	if err != nil {
+		return
+	}
+	_, _ = h.dbPool.Exec(ctx, `
+		UPDATE assessment_sessions
+		SET status = $1,
+		    started_at = COALESCE(started_at, NOW()),
+		    updated_at = NOW()
+		WHERE id = $2
+	`, status, parsedID)
+}
+
 
