@@ -16,6 +16,7 @@ import (
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/config"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/db"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/embedding"
+	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/evaluator"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/handler"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/projector"
 	"github.com/yourusername/ai-interview/services/job-candidate-service/internal/repository"
@@ -121,6 +122,14 @@ func main() {
 		logger.Info("turn projector started (embedded, outbox mode)")
 		proj.RunOutboxMode(serverCtx)
 		logger.Info("turn projector stopped")
+	}()
+
+	// ── Embedded evaluation worker (outbox_completed processor) ─────────────
+	evalWorker := evaluator.NewEvaluatorWorker(pool, logger, cfg.GroqAPIKey, cfg.GroqModel, 1*time.Second)
+	go func() {
+		logger.Info("evaluation worker started (embedded, outbox mode)")
+		evalWorker.RunOutboxMode(serverCtx)
+		logger.Info("evaluation worker stopped")
 	}()
 
 	// Block until SIGINT or SIGTERM

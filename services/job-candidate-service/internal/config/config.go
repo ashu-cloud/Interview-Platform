@@ -25,6 +25,10 @@ type Config struct {
 	EmbeddingDims         int
 	EmbeddingBaseURL      string
 	DemoMode              bool // ASSESSMENT_DEMO_MODE: use random demo embeddings
+
+	// Evaluation synthesis (Groq LLM)
+	GroqAPIKey string
+	GroqModel  string
 }
 
 // Load reads all required env vars and returns Config.
@@ -47,6 +51,8 @@ func Load() (*Config, error) {
 		EmbeddingModel:   getEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
 		EmbeddingBaseURL: strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
 		DemoMode:         strings.EqualFold(os.Getenv("ASSESSMENT_DEMO_MODE"), "true") || strings.EqualFold(os.Getenv("INTERVIEW_DEMO_MODE"), "true"),
+		GroqAPIKey:       strings.TrimSpace(os.Getenv("GROQ_API_KEY")),
+		GroqModel:        getEnv("GROQ_MODEL", "openai/gpt-oss-120b"),
 	}
 
 	cfg.EmbeddingDims = 768

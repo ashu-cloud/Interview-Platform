@@ -109,7 +109,7 @@ func (r *FeedbackRepository) SaveEvaluationReport(ctx context.Context, data mode
 	_, err = tx.Exec(ctx, `
 		INSERT INTO evaluation_reports (id, interview_id, org_id, summary, overall_score, recommendation, transcript_json)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, reportID, data.SessionID, data.OrgID, data.Summary, data.OverallScore, data.Recommendation, data.TranscriptJSON)
+	`, reportID, data.SessionID, data.OrgID, data.Summary, data.OverallScore, data.Recommendation, string(data.TranscriptJSON))
 	if err != nil {
 		return "", fmt.Errorf("insert evaluation report: %w", err)
 	}
@@ -162,7 +162,7 @@ func (r *FeedbackRepository) SaveFeedback(ctx context.Context, interviewID strin
 	_, err = tx.Exec(ctx,
 		`INSERT INTO evaluation_reports (id, interview_id, org_id, summary, overall_score, recommendation, transcript_json) 
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		feedbackID, interviewID, orgID, feedback.Summary, feedback.OverallScore, feedback.Recommendation, transcriptJSON,
+		feedbackID, interviewID, orgID, feedback.Summary, feedback.OverallScore, feedback.Recommendation, string(transcriptJSON),
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert feedback report: %w", err)
