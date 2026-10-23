@@ -5,17 +5,17 @@ export default function ResilienceGrid() {
     {
       track: "// TRACK 01",
       title: "Dual-Track Critical Path",
-      desc: "In-memory Redis state and Redlock distributed mutexes handle the audio loop in under 5ms, decoupling conversational speed entirely from the heavier analytical evaluation engine.",
+      desc: "In-memory Upstash / Redis 7.2 state and Redlock distributed mutexes handle the audio loop in under 5ms, decoupling conversational speed entirely from the heavier analytical evaluation engine.",
       label: "STORAGE:",
-      val: "Redis Cluster 7.2",
+      val: "Upstash / Redis 7.2 (TLS)",
       badge: "LATENCY < 5MS",
     },
     {
       track: "// TRACK 02",
-      title: "Dual-Mode Messaging",
-      desc: "Emits to Apache Kafka topic streams (session.turns, session.completed) during high-scale enterprise operations, with seamless fallback to Postgres Transactional Outbox for single-node deployments.",
+      title: "Dual-Mode Event Delivery",
+      desc: "Dispatches to PostgreSQL Transactional Outbox (with FOR UPDATE SKIP LOCKED batching for 0-cost single-node) or Apache Kafka KRaft topics (session.turns, session.completed) for distributed clusters.",
       label: "BROKER:",
-      val: "Kafka KRaft / Outbox",
+      val: "Postgres Outbox / Kafka",
       badge: "ZERO-DATA-LOSS",
     },
     {

@@ -1,4 +1,5 @@
 import React from "react";
+import Link from "next/link";
 import HeroVoiceTelemetry from "./HeroVoiceTelemetry";
 import Logo from "@/components/ui/Logo";
 
@@ -62,18 +63,24 @@ export default function HeroMonograph() {
               </div>
             </div>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <a
-                className="flex-1 text-center py-3.5 px-5 bg-sumi text-paper font-mono text-xs uppercase tracking-widest font-semibold rounded hover:bg-neutral-800 transition-colors"
-                href="#pipeline-demo"
+              <Link
+                className="flex-1 text-center py-3.5 px-5 bg-sumi text-paper font-mono text-xs uppercase tracking-widest font-semibold rounded hover:bg-neutral-800 transition-colors shadow-xs"
+                href="/auth"
               >
-                Inspect Real-Time Demo
-              </a>
+                Launch Hiring Console →
+              </Link>
               <a
                 className="py-3.5 px-5 border border-hairline bg-white hover:border-sumi font-mono text-xs uppercase tracking-widest rounded transition-colors text-sumi"
-                href="#scatter-gather"
+                href="#pipeline-demo"
               >
-                Monograph Dossier
+                Live Telemetry
               </a>
+            </div>
+            <div className="mt-3 flex items-center justify-between text-[11px] font-mono text-sumi-muted px-1">
+              <span>Candidate invitation token?</span>
+              <Link href="/auth" className="text-sumi font-medium underline hover:text-emerald-700 transition-colors">
+                Enter Stage Access →
+              </Link>
             </div>
           </div>
         </div>

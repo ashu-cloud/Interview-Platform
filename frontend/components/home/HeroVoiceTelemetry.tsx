@@ -389,7 +389,7 @@ export default function HeroVoiceTelemetry() {
           </div>
           <span className="text-hairline">|</span>
           <span className="text-sumi-muted text-[11px]">
-            OPUS-48k-STEREO • DIRECT WEBSOCKET LINK
+            LINEAR 16kHz PCM • FULL-DUPLEX WEBSOCKET LINK
           </span>
         </div>
         <div className="flex items-center gap-5 text-[11px]">
