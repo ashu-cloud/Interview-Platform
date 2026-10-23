@@ -1,5 +1,12 @@
 # VoxAssess — Low-Latency Adaptive Voice Assessment Platform
 
+[![Live App](https://img.shields.io/badge/Live%20App-interview--platform--pink.vercel.app-10b981?style=for-the-badge&logo=vercel&logoColor=white)](https://interview-platform-pink.vercel.app)
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github)](https://github.com/ashu-cloud/Interview-Platform)
+[![Next.js](https://img.shields.io/badge/Frontend-Next.js%2016-black?style=for-the-badge&logo=next.js)](https://interview-platform-pink.vercel.app)
+
+> 🌐 **Live Production Deployment**: **[https://interview-platform-pink.vercel.app](https://interview-platform-pink.vercel.app)**  
+> Experience real-time conversational technical voice interviews, speech waveform telemetry, and grounded competency evaluation dossiers.
+
 VoxAssess is an enterprise-grade AI voice platform designed for automated, structured technical and behavioral candidate assessments. It features real-time bidirectional audio streaming, speculative RAG prefetching, adaptive competency steering, and asynchronous rubric evaluations with verbatim evidence attribution.
 
 ---
@@ -139,6 +146,13 @@ docker compose up -d
 ```
 
 ### 4. Access the Web Application
+
+#### Live Production
+- **Live Application**: [https://interview-platform-pink.vercel.app](https://interview-platform-pink.vercel.app)
+- **Manager Console**: [https://interview-platform-pink.vercel.app/console](https://interview-platform-pink.vercel.app/console)
+- **Candidate Evaluation Dossier**: [https://interview-platform-pink.vercel.app/candidates](https://interview-platform-pink.vercel.app/candidates)
+
+#### Local Development
 - **Hiring Manager Hub**: [http://localhost:3000/console](http://localhost:3000/console) (Log in or register to create assessment tracks and view dossiers).
 - **Public Candidate Portal**: `http://localhost:3000/apply/<track_id>`.
 - **MinIO Storage Console**: [http://localhost:9001](http://localhost:9001) (`minioadmin` / `minioadmin`).
