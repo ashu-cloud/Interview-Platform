@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
@@ -104,13 +105,20 @@ func main() {
 	var dbPool *pgxpool.Pool
 	if cfg.DatabaseURL != "" {
 		poolCtx, poolCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		p, poolErr := pgxpool.New(poolCtx, cfg.DatabaseURL)
-		poolCancel()
-		if poolErr == nil {
-			dbPool = p
-			defer dbPool.Close()
+		pCfg, pErr := pgxpool.ParseConfig(cfg.DatabaseURL)
+		if pErr == nil {
+			pCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+			p, poolErr := pgxpool.NewWithConfig(poolCtx, pCfg)
+			poolCancel()
+			if poolErr == nil {
+				dbPool = p
+				defer dbPool.Close()
+			} else {
+				slog.Warn("could not connect database pool for audio recordings", "error", poolErr)
+			}
 		} else {
-			slog.Warn("could not connect database pool for audio recordings", "error", poolErr)
+			poolCancel()
+			slog.Warn("could not parse database URL for audio recordings", "error", pErr)
 		}
 	}
 
