@@ -167,9 +167,26 @@ func main() {
 	mux.HandleFunc("/debug/voice", debugHandler.HandleDebugVoice)
 	mux.HandleFunc("/ws/interview/", wsHandler.HandleWS)
 
+	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqOrigin := r.Header.Get("Origin")
+		if reqOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", reqOrigin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Internal-Key, Accept, Origin, X-Requested-With")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
-		Handler:      mux,
+		Handler:      corsHandler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,

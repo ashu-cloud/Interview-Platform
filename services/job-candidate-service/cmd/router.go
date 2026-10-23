@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,15 +24,46 @@ func newRouter(handlers routeHandlers, jwtSecret, internalAPIKey string) *gin.En
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	// CORS middleware for web clients (e.g. Cloudflare Pages)
+	// CORS middleware for web clients (e.g. Vercel, Cloudflare Pages, localhost)
 	r.Use(func(c *gin.Context) {
-		origin := os.Getenv("APP_DOMAIN")
-		if origin == "" {
-			origin = "*"
+		reqOrigin := c.Request.Header.Get("Origin")
+		allowedOrigin := "*"
+
+		if reqOrigin != "" {
+			allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
+			if allowedOriginsEnv != "" {
+				matched := false
+				for _, o := range strings.Split(allowedOriginsEnv, ",") {
+					o = strings.TrimSpace(o)
+					if o == "*" || o == reqOrigin {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					allowedOrigin = reqOrigin
+				} else {
+					allowedOrigin = os.Getenv("APP_DOMAIN")
+					if allowedOrigin == "" {
+						allowedOrigin = reqOrigin
+					}
+				}
+			} else {
+				// Default permissive: dynamically reflect request origin so Vercel previews & prod work
+				allowedOrigin = reqOrigin
+			}
+		} else if appDomain := os.Getenv("APP_DOMAIN"); appDomain != "" {
+			allowedOrigin = appDomain
 		}
-		c.Header("Access-Control-Allow-Origin", origin)
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Internal-Key")
+
+		c.Header("Access-Control-Allow-Origin", allowedOrigin)
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Internal-Key, Accept, Origin, X-Requested-With")
+		if allowedOrigin != "*" {
+			c.Header("Access-Control-Allow-Credentials", "true")
+		}
+		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
