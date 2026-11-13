@@ -1,104 +1,174 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
+import {
+  MetricPipeliningSVG,
+  MetricGroundingProofSVG,
+  MetricVectorHNSWSVG,
+  MetricOutboxFallbackSVG,
+} from "@/components/artwork/MetricDraftingSVGs";
+import {
+  BlurReveal,
+  ClipCurtainReveal,
+  MagneticSpotlightPlate,
+  SectionRackFocusStage,
+  StaggerItem,
+  StaggerWave,
+} from "@/components/motion/ScrollChoreography";
+
+interface MetricSpec {
+  id: string;
+  exhibitNumber: string;
+  metric: string;
+  title: string;
+  protocolBadge: string;
+  classification: "BENCHMARK TARGET" | "DESIGN SPEC" | "ALGORITHMIC BOUND" | "ARCHITECTURAL INTENT";
+  description: string;
+  technicalBreakdown: string;
+  svgVisual: React.ReactNode;
+}
+
+const specs: MetricSpec[] = [
+  {
+    id: "latency",
+    exhibitNumber: "EXH. 01.A",
+    metric: "< 800ms",
+    title: "Sentence-Boundary Pipelining",
+    protocolBadge: "WSS / OPUS 48k",
+    classification: "BENCHMARK TARGET",
+    description:
+      "Synthesizes voice upon encountering the first terminal delimiter (., ?, !), streaming Opus audio chunks back prior to complete inference termination.",
+    technicalBreakdown: "Deepgram 184ms + Groq 210ms + ElevenLabs 198ms = 592ms compute path.",
+    svgVisual: <MetricPipeliningSVG className="w-full h-12 my-2 text-sumi" />,
+  },
+  {
+    id: "grounding",
+    exhibitNumber: "EXH. 01.B",
+    metric: "100%",
+    title: "Verbatim Quote Grounding",
+    protocolBadge: "TOKEN BOUND",
+    classification: "DESIGN SPEC",
+    description:
+      "Evaluations and monograph deductions are bound to exact candidate turns. Every citation must match the PostgreSQL turn ledger without hallucinated commentary.",
+    technicalBreakdown: "Immutable substring verification against PostgreSQL turn ledger records.",
+    svgVisual: <MetricGroundingProofSVG className="w-full h-12 my-2 text-sumi" />,
+  },
+  {
+    id: "hnsw",
+    exhibitNumber: "EXH. 01.C",
+    metric: "O(1)",
+    title: "Materialized Turn Vector Index",
+    protocolBadge: "HNSW (M=16, ef=64)",
+    classification: "ALGORITHMIC BOUND",
+    description:
+      "session_turns schema backed by indexed pgvector HNSW indexes. Targets sub-15ms cosine similarity over 768-dimensional competence rubrics.",
+    technicalBreakdown: "Sub-15ms cosine distance search over 768-dimensional embeddings in PostgreSQL 16.",
+    svgVisual: <MetricVectorHNSWSVG className="w-full h-12 my-2 text-sumi" />,
+  },
+  {
+    id: "outbox",
+    exhibitNumber: "EXH. 01.D",
+    metric: "Zero-Broker",
+    title: "Lean Edge Concurrency Fallback",
+    protocolBadge: "KAFKA / ACID OUTBOX",
+    classification: "ARCHITECTURAL INTENT",
+    description:
+      "PostgreSQL transactional outbox fallback using FOR UPDATE SKIP LOCKED batching. Eliminates broker single-points-of-failure for standalone or clustered nodes.",
+    technicalBreakdown: "Automatic failover: Apache Kafka KRaft clusters or PostgreSQL transactional outbox.",
+    svgVisual: <MetricOutboxFallbackSVG className="w-full h-12 my-2 text-sumi" />,
+  },
+];
 
 export default function MetricsPlates() {
-  const [activePlate, setActivePlate] = useState<number | null>(null);
-
-  const plates = [
-    {
-      id: 1,
-      tag: "PLATE 01.A // AUDIO CRITICAL PATH",
-      metric: "< 800ms",
-      title: "Sentence-Boundary Pipelining",
-      desc: "Synthesizes voice upon encountering the first terminal delimiter (., ?, !), streaming Opus audio chunks back prior to complete inference termination.",
-      spec: "SPEC: WSS / OPUS 48k",
-      status: "SUB-240ms TTFB",
-      interactiveTip: "Deepgram 184ms + Groq 210ms + ElevenLabs 198ms = 592ms Compute",
-    },
-    {
-      id: 2,
-      tag: "PLATE 01.B // EVIDENCE SUBSTRATE",
-      metric: "100%",
-      title: "Verbatim Quote Grounding",
-      desc: "Every score, monograph critique, and rubric deduction is verified against an immutable verbatim substring lookup of candidate turns. Zero speculative hallucination.",
-      spec: "VERIFICATION: TOKEN BOUND",
-      status: "SHA-256 PROOF",
-      interactiveTip: "Tamper-proof HMAC seal rejects any evaluation missing from Postgres ledger",
-    },
-    {
-      id: 3,
-      tag: "PLATE 01.C // EMBEDDINGS & RETRIEVAL",
-      metric: "O(1)",
-      title: "Materialized Turn Vector Index",
-      desc: "session_turns schema backed by indexed pgvector HNSW indexes, providing instant semantic similarity checks against multi-dimensional competence rubrics.",
-      spec: "INDEX: HNSW (M=16, ef=64)",
-      status: "POSTGRESQL 16",
-      interactiveTip: "Sub-15ms vector cosine distance across 768-dimensional manifold",
-    },
-    {
-      id: 4,
-      tag: "PLATE 01.D // RESILIENCE DISCIPLINE",
-      metric: "Zero-Broker",
-      title: "Lean Edge Concurrency Fallback",
-      desc: "Engineered with transactional outbox & FOR UPDATE SKIP LOCKED row locking. Operates frictionlessly on Apache Kafka or standalone PostgreSQL.",
-      spec: "KAFKA / ACID OUTBOX",
-      status: "FAULT-TOLERANT",
-      interactiveTip: "Zero single-point-of-failure; automatic Postgres outbox queue failover",
-    },
-  ];
-
   return (
-    <section className="py-24 lg:py-36 hairline-b bg-paper-card" data-purpose="metrics-plates">
-      <div className="max-w-7xl mx-auto px-6 lg:px-12">
-        <div className="text-xs font-mono text-sumi-muted tracking-widest uppercase mb-6 flex items-center justify-between">
-          <span>ATELIER FOLIO // BENCHMARK SPECIFICATIONS</span>
-          <span className="folio-stamp">DETERMINISTIC VERIFICATION</span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-hairline border border-hairline bg-white shadow-sm">
-          {plates.map((plate) => {
-            const isHovered = activePlate === plate.id;
-            return (
-              <div
-                key={plate.id}
-                onMouseEnter={() => setActivePlate(plate.id)}
-                onMouseLeave={() => setActivePlate(null)}
-                className={`p-10 lg:p-12 flex flex-col justify-between transition-all duration-200 cursor-pointer relative group ${
-                  isHovered ? "bg-paper-card/70" : "bg-white"
-                }`}
-              >
-                <div>
-                  <div className="font-mono text-[10px] text-sumi-muted uppercase tracking-widest mb-3 flex items-center justify-between">
-                    <span>{plate.tag}</span>
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-0 group-hover:opacity-100 transition-opacity"></span>
-                  </div>
-                  <div className="text-4xl sm:text-5xl font-mono font-semibold text-sumi tracking-tight mb-3 transition-transform group-hover:translate-x-1 duration-200">
-                    {plate.metric}
-                  </div>
-                  <div className="text-sm font-semibold text-sumi mb-3 font-sans">
-                    {plate.title}
-                  </div>
-                  <p className="text-xs text-sumi-secondary leading-relaxed font-sans">
-                    {plate.desc}
-                  </p>
+    <SectionRackFocusStage maxBlur={12}>
+      <section
+        id="benchmarks"
+        className="py-16 lg:py-24 hairline-b bg-white"
+        data-purpose="metrics-engineering-strip"
+      >
+        <div className="max-w-7xl 2xl:max-w-[1440px] mx-auto px-6 lg:px-12">
+          {/* Strip Section Header */}
+          <BlurReveal blurPx={8} yOffset={18}>
+            <div className="flex flex-col sm:flex-row sm:items-baseline justify-between pb-6 mb-8 hairline-b gap-4">
+              <div className="space-y-1">
+                <div className="font-mono text-[10.5px] uppercase tracking-widest text-sumi-muted flex items-center gap-2">
+                  <span className="font-bold text-sumi">TABLE 01</span>
+                  <span>//</span>
+                  <span>MEASUREMENT RIGOR &bull; SYSTEM BENCHMARKS</span>
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-light text-sumi tracking-tight">
+                  Engineering Specification Ledger
+                </h2>
+              </div>
+              <div className="font-mono text-xs text-sumi-secondary">
+                SPECIFICATION TOPOLOGY: DETERMINISTIC // V4.2
+              </div>
+            </div>
+          </BlurReveal>
+
+          {/* Monograph Aligned Engineering Columns (Apple 3D Magnetic Spotlight Plates + Curtain Reveal) */}
+          <ClipCurtainReveal direction="up">
+            <StaggerWave
+              staggerDelay={0.07}
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 border border-hairline bg-[#FAF8F5] divide-y md:divide-y-0 md:divide-x divide-hairline rounded-sm shadow-xs"
+            >
+              {specs.map((item) => (
+                <StaggerItem
+                  key={item.id}
+                  blurPx={7}
+                  yOffset={24}
+                  className="bg-white hover:bg-[#FAF8F5] transition-colors group"
+                >
+                  <MagneticSpotlightPlate
+                    tiltStrength={3.5}
+                    className="p-6 lg:p-7 h-full flex flex-col justify-between"
+                  >
+              <div className="space-y-4">
+                {/* Header Tag & Classification */}
+                <div className="flex items-center justify-between text-[10px] font-mono text-sumi-muted uppercase tracking-wider pb-2 border-b border-hairline/60">
+                  <span className="font-bold text-sumi">{item.exhibitNumber}</span>
+                  <span className="px-2 py-0.5 rounded-xs bg-[#F4F1EA] text-sumi border border-hairline font-semibold text-[9px]">
+                    {item.classification}
+                  </span>
                 </div>
 
-                <div className="mt-8 pt-5 hairline-t font-mono text-[11px] text-sumi-muted flex flex-col gap-1">
-                  <div className="flex justify-between">
-                    <span>{plate.spec}</span>
-                    <span className="text-emerald-600 font-semibold">{plate.status}</span>
+                {/* Primary Metric Number & Spec Badge */}
+                <div className="space-y-1">
+                  <div className="text-3xl sm:text-4xl lg:text-[40px] font-mono font-medium text-sumi tracking-tight leading-none group-hover:text-ultramarine transition-colors">
+                    {item.metric}
                   </div>
-                  {isHovered && (
-                    <div className="text-[10px] text-sumi font-sans bg-white p-2 rounded border border-hairline mt-2 shadow-xs transition-all">
-                      💡 {plate.interactiveTip}
-                    </div>
-                  )}
+                  <div className="font-mono text-[10px] text-sumi-muted uppercase tracking-widest pt-1">
+                    {item.protocolBadge}
+                  </div>
                 </div>
+
+                {/* Title & Diagram */}
+                <div>
+                  <h3 className="font-sans font-semibold text-sm text-sumi leading-snug">
+                    {item.title}
+                  </h3>
+                  {item.svgVisual}
+                </div>
+
+                {/* Description */}
+                <p className="font-sans text-xs text-sumi-secondary leading-relaxed">
+                  {item.description}
+                </p>
               </div>
-            );
-          })}
+
+              {/* Technical Computation Breakdown Footer */}
+              <div className="mt-6 pt-3 border-t border-hairline/80 font-mono text-[10px] text-sumi-muted leading-tight">
+                <span className="text-sumi font-semibold block uppercase text-[9px] mb-0.5">COMPUTATION SPEC:</span>
+                <span>{item.technicalBreakdown}</span>
+              </div>
+                  </MagneticSpotlightPlate>
+                </StaggerItem>
+              ))}
+            </StaggerWave>
+          </ClipCurtainReveal>
         </div>
-      </div>
-    </section>
+      </section>
+    </SectionRackFocusStage>
   );
 }

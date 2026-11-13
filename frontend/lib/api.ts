@@ -211,7 +211,7 @@ async function request<T>(
     } catch {
       // Body not JSON
     }
-    const error: any = new Error(errorMsg);
+    const error = new Error(errorMsg) as Error & { status?: number };
     error.status = res.status;
     throw error;
   }
@@ -223,55 +223,58 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
-function normalizeSessionItem(item: any): SessionItem {
-  if (!item) return item;
+function normalizeSessionItem(item: Record<string, unknown> | null | undefined): SessionItem {
+  if (!item) return {} as SessionItem;
+  const cand = item.candidate as Record<string, unknown> | undefined;
+  const docket = item.docket as Record<string, unknown> | undefined;
+  const feedback = item.feedback as Record<string, unknown> | undefined;
   return {
-    id: item.id || "",
-    participant_id: item.candidate?.id || item.participant_id || "",
-    participant_name: item.candidate?.full_name || item.participant_name || "Candidate",
-    participant_email: item.candidate?.email || item.participant_email || "",
-    track_id: item.docket?.job_role_id || item.track_id || "",
-    track_title: item.docket?.title || item.track_title || "Technical Track",
-    blueprint_id: item.docket?.id || item.blueprint_id || "",
-    blueprint_title: item.docket?.title || item.blueprint_title || "Technical Assessment Blueprint",
-    status: item.status || "invited",
-    turn_count: item.turn_count || 0,
-    score: item.feedback?.overall_score ?? item.score,
-    recommendation: item.feedback?.recommendation || item.recommendation,
-    started_at: item.started_at,
-    completed_at: item.completed_at,
-    created_at: item.created_at,
+    id: String(item.id || ""),
+    participant_id: String(cand?.id || item.participant_id || ""),
+    participant_name: String(cand?.full_name || item.participant_name || "Candidate"),
+    participant_email: String(cand?.email || item.participant_email || ""),
+    track_id: String(docket?.job_role_id || item.track_id || ""),
+    track_title: String(docket?.title || item.track_title || "Technical Track"),
+    blueprint_id: String(docket?.id || item.blueprint_id || ""),
+    blueprint_title: String(docket?.title || item.blueprint_title || "Technical Assessment Blueprint"),
+    status: (item.status as SessionItem["status"]) || "invited",
+    turn_count: Number(item.turn_count) || 0,
+    score: feedback?.overall_score != null ? Number(feedback.overall_score) : (item.score as number | undefined),
+    recommendation: (feedback?.recommendation as string | undefined) || (item.recommendation as string | undefined),
+    started_at: item.started_at as string | undefined,
+    completed_at: item.completed_at as string | undefined,
+    created_at: item.created_at as string | undefined,
   };
 }
 
-function normalizeEvaluationReport(raw: any, sessionId: string): EvaluationReport {
-  const scores = raw.scores || raw.criteria_results || [];
-  const criteriaResults: CriterionResult[] = scores.map((s: any, idx: number) => {
-    const evidence = s.evidence_quote || s.evidence || undefined;
-    const rawFeedback = s.feedback || "";
-    // Only keep feedback if it is distinct from the raw verbatim evidence quote
+function normalizeEvaluationReport(raw: Record<string, unknown>, sessionId: string): EvaluationReport {
+  const scores = (raw.scores || raw.criteria_results || []) as Array<Record<string, unknown>>;
+  const criteriaResults: CriterionResult[] = scores.map((s: Record<string, unknown>, idx: number) => {
+    const evidence = (s.evidence_quote || s.evidence || undefined) as string | undefined;
+    const rawFeedback = String(s.feedback || "");
     const feedback = rawFeedback && rawFeedback !== evidence ? rawFeedback : "";
 
     return {
-      criterion_id: s.criterion_id || s.id || `crit-${idx + 1}`,
-      name: s.criterion_name || s.name || `Criterion #${idx + 1}`,
-      score: s.score ?? 0,
-      max_score: s.max_score ?? 10,
+      criterion_id: String(s.criterion_id || s.id || `crit-${idx + 1}`),
+      name: String(s.criterion_name || s.name || `Criterion #${idx + 1}`),
+      score: Number(s.score ?? 0),
+      max_score: Number(s.max_score ?? 10),
       feedback: feedback,
       evidence_quote: evidence,
-      grounded: s.is_grounded ?? s.grounded ?? true,
+      grounded: Boolean(s.is_grounded ?? s.grounded ?? true),
     };
   });
 
+  const cand = raw.candidate as Record<string, unknown> | undefined;
   return {
-    id: raw.id || "",
+    id: String(raw.id || ""),
     session_id: sessionId,
-    participant_name: raw.participant_name || raw.candidate?.full_name || "",
-    overall_score: raw.overall_score ?? 0,
-    recommendation: raw.recommendation || "revisit",
-    summary: raw.summary || "",
+    participant_name: String(raw.participant_name || cand?.full_name || ""),
+    overall_score: Number(raw.overall_score ?? 0),
+    recommendation: String(raw.recommendation || "revisit"),
+    summary: String(raw.summary || ""),
     criteria_results: criteriaResults,
-    created_at: raw.created_at,
+    created_at: raw.created_at ? String(raw.created_at) : undefined,
   };
 }
 
@@ -516,7 +519,7 @@ export const api = {
     if (params?.limit) searchParams.set("limit", String(params.limit));
 
     const qs = searchParams.toString() ? `?${searchParams.toString()}` : "";
-    const res = await request<{ sessions?: any[]; interviews?: any[] }>(
+    const res = await request<{ sessions?: Record<string, unknown>[]; interviews?: Record<string, unknown>[] }>(
       `/api/v1/sessions${qs}`
     );
     const list = res.sessions || res.interviews || [];
@@ -524,7 +527,7 @@ export const api = {
   },
 
   async getSession(id: string): Promise<SessionItem> {
-    const item = await request<any>(`/api/v1/sessions/${id}`);
+    const item = await request<Record<string, unknown>>(`/api/v1/sessions/${id}`);
     return normalizeSessionItem(item);
   },
 
@@ -536,10 +539,11 @@ export const api = {
   // Evaluation Dossier
   async getSessionEvaluation(id: string): Promise<EvaluationReport | null> {
     try {
-      const raw = await request<any>(`/api/v1/sessions/${id}/evaluation`);
+      const raw = await request<Record<string, unknown>>(`/api/v1/sessions/${id}/evaluation`);
       return normalizeEvaluationReport(raw, id);
-    } catch (err: any) {
-      if (err?.status === 404 || (typeof err?.message === "string" && err.message.includes("404"))) {
+    } catch (err: unknown) {
+      const e = err as { status?: number; message?: string } | undefined;
+      if (e?.status === 404 || (typeof e?.message === "string" && e.message.includes("404"))) {
         return null;
       }
       throw err;

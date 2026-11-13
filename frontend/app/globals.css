@@ -37,15 +37,7 @@ body {
   font-family: var(--font-space-grotesk), system-ui, sans-serif;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-}
-
-/* Hide default operating system and pointer hand cursors across entire document */
-html,
-body,
-*,
-*::before,
-*::after {
-  cursor: none !important;
+  overflow-x: clip;
 }
 
 ::selection {
@@ -98,7 +90,6 @@ body,
 .crosshair-corner:hover::before,
 .crosshair-corner:hover::after {
   color: #141413;
-  text-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
 }
 
 /* Museum Seal Watermark with interactive sheen */
@@ -209,4 +200,19 @@ body,
 .packet-flow-line {
   stroke-dasharray: 6 4;
   animation: packet-dash 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+  .live-pulse,
+  .scan-active::after,
+  .ripple-ring-1,
+  .ripple-ring-2,
+  .ripple-ring-3,
+  .shimmer-active::after,
+  .packet-flow-line {
+    animation: none !important;
+  }
 }

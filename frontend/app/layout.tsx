@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, Cormorant_Garamond, JetBrains_Mono } from "next/font/google";
-import CustomCursor from "@/components/ui/CustomCursor";
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -46,7 +45,6 @@ export default function RootLayout({
         suppressHydrationWarning
         className="min-h-screen technical-grid selection:bg-sumi selection:text-paper antialiased flex flex-col justify-between"
       >
-        <CustomCursor />
         {children}
       </body>
     </html>

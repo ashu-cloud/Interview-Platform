@@ -1,100 +1,148 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import { IsometricCoverageDiagram } from "@/components/artwork/IsometricSystemDiagrams";
+import {
+  APPLE_SPRING,
+  ARCHITECTURAL_EASE,
+  BlurReveal,
+  ScrubParallaxLayer,
+  SectionRackFocusStage,
+} from "@/components/motion/ScrollChoreography";
 
-interface Criterion {
+interface CoverageCriterion {
   id: number;
   name: string;
   cosineSim: number;
+  percentage: number;
   resolved: boolean;
   notes: string;
   probe: string;
 }
 
-const initialCriteria: Criterion[] = [
+const initialCriteria: CoverageCriterion[] = [
   {
     id: 1,
-    name: "1. Concurrency & Lock-Free Primitives",
+    name: "Concurrency & Lock-Free Primitives",
     cosineSim: 0.884,
+    percentage: 88.4,
     resolved: true,
-    notes: "Explored via Ringbuffer Mutex Question",
+    notes: "Ringbuffer CAS queue evaluated. Meets threshold.",
     probe: "How do you avoid ABA issues in lock-free CAS linked queues without hazard pointers?",
   },
   {
     id: 2,
-    name: "2. Distributed Consensus & Raft",
+    name: "Distributed Consensus & Raft",
     cosineSim: 0.420,
+    percentage: 42.0,
     resolved: false,
-    notes: "Pipelined probe ready. Active deficit below threshold.",
+    notes: "Active deficit below τ = 0.65 threshold. Pipelined probe ready.",
     probe: "How does your architecture handle network partitions during joint consensus reconfigurations?",
   },
   {
     id: 3,
-    name: "3. Production Incident Triage & Memory Leaks",
+    name: "Production Incident Triage & Memory Leaks",
     cosineSim: 0.912,
+    percentage: 91.2,
     resolved: true,
-    notes: "Validated with eBPF core dump scenario",
+    notes: "eBPF kprobe core dump analysis verified.",
     probe: "How do you pinpoint off-heap memory leak origins in high-throughput CGO allocations?",
+  },
+  {
+    id: 4,
+    name: "Storage Substrates & Direct I/O",
+    cosineSim: 0.820,
+    percentage: 82.0,
+    resolved: true,
+    notes: "NVMe O_DIRECT direct block writes evaluated.",
+    probe: "What kernel synchronization barriers did you introduce during concurrent fsync calls?",
   },
 ];
 
-const exhibits = [
+interface GroundedExhibit {
+  id: string;
+  label: string;
+  topic: string;
+  score: string;
+  reference: string;
+  turn: string;
+  essay: string;
+  quote: string;
+}
+
+const exhibits: GroundedExhibit[] = [
   {
     id: "alpha",
     label: "EXHIBIT // ALPHA",
-    title: "DISTRIBUTED CONSENSUS & WAN SPLIT-BRAIN",
-    rating: "8.8 / 10",
-    turn: "TURN 14 • 26:40",
+    topic: "Distributed Consensus & WAN Split-Brain",
+    score: "8.8 / 10",
+    reference: "e78f...921a",
+    turn: "Turn 14, 26:40",
     essay:
-      "Rostova evaluates not merely as a software architect, but as an applied mechanist of modern infrastructure. Over the course of the 54-minute interrogation, her responses exhibited the tactile confidence of someone who has engineered storage substrates under direct fire.",
+      "Rostova evaluates as an applied mechanist of distributed infrastructure. Her responses exhibited rigorous tactile confidence on storage substrates under network partition stress.",
     quote:
-      "Tail latency climbs from 2.8ms to roughly 44ms... our philosophy is categorical: we accept tail latency spikes in exchange for zero stale dirty reads.",
-    sha: "e78f...921a",
+      "Tail latency climbs from 2.8ms to roughly 44ms... our philosophy is categorical: we accept tail latency spikes in exchange for zero stale dirty reads on ledger accounts.",
   },
   {
     id: "beta",
     label: "EXHIBIT // BETA",
-    title: "IO_URING DIRECT BLOCK ENGINE",
-    rating: "9.4 / 10",
-    turn: "TURN 09 • 14:22",
+    topic: "io_uring Direct Block Engine",
+    score: "9.4 / 10",
+    reference: "9a21...bb44",
+    turn: "Turn 09, 14:22",
     essay:
-      "Her analysis of memory alignment for O_DIRECT NVMe writes was exhaustive. She avoided standard POSIX abstractions in favor of kernel ringbuffers, correctly reasoning about submission and completion queue polling frequencies.",
+      "Her analysis of memory alignment for O_DIRECT NVMe writes was exhaustive. She bypassed standard POSIX abstractions in favor of kernel ringbuffers.",
     quote:
       "We bypassed RocksDB memtable locks via custom ringbuffer write batches directly to raw NVMe namespace with zero page cache contention.",
-    sha: "9a21...bb44",
   },
   {
     id: "gamma",
     label: "EXHIBIT // GAMMA",
-    title: "MONOTONIC FENCING & EPOCH QUORUM",
-    rating: "8.9 / 10",
-    turn: "TURN 16 • 31:04",
+    topic: "Monotonic Fencing & Epoch Quorum",
+    score: "8.9 / 10",
+    reference: "41bc...d09e",
+    turn: "Turn 16, 31:04",
     essay:
-      "The candidate displayed deep intuition on partition survivability. While discussing split-brain resolution, she proved that without monotonicity checks, uncommitted terms can poison follower logs during re-election.",
+      "The candidate displayed deep intuition on partition survivability, proving that without monotonicity checks, uncommitted terms can poison follower logs during re-election.",
     quote:
       "Fencing tokens are signed with monotonicity guarantees; un-fenced epochs get instantly quarantined before quorum acknowledgment.",
-    sha: "41bc...d09e",
   },
 ];
 
 export default function CoverageDeepDive() {
-  const [criteria, setCriteria] = useState<Criterion[]>(initialCriteria);
-  const [selectedCriterion, setSelectedCriterion] = useState<Criterion>(initialCriteria[1]);
-  const [isSimulatingDeficit, setIsSimulatingDeficit] = useState(false);
-  const [activeExhibit, setActiveExhibit] = useState(exhibits[0]);
+  const [criteria, setCriteria] = useState<CoverageCriterion[]>(initialCriteria);
+  const [selectedCriterionId, setSelectedCriterionId] = useState<number>(2);
+  const [isUserInteracted, setIsUserInteracted] = useState<boolean>(false);
+  const [isSimulatingProbe, setIsSimulatingProbe] = useState(false);
+  const [activeExhibit, setActiveExhibit] = useState<GroundedExhibit>(exhibits[0]);
 
-  // RAG Race state
-  const [isRacing, setIsRacing] = useState(false);
-  const [sequentialProgress, setSequentialProgress] = useState(100);
-  const [speculativeProgress, setSpeculativeProgress] = useState(100);
-  const [raceElapsedMs, setRaceElapsedMs] = useState(0);
+  const activeIdx = Math.max(
+    0,
+    criteria.findIndex((c) => c.id === selectedCriterionId)
+  );
+  const selectedCriterion = criteria[activeIdx] || criteria[1];
 
-  // Deficit calculation
-  const activeDeficit = Number((1.0 - selectedCriterion.cosineSim).toFixed(3));
-  const isDeficitOverThreshold = activeDeficit > 0.35; // tau = 0.65 threshold (cosine < 0.65 means deficit > 0.35)
+  useEffect(() => {
+    if (isUserInteracted || isSimulatingProbe) return;
+    const timer = setInterval(() => {
+      setSelectedCriterionId((prevId) => {
+        const curIdx = criteria.findIndex((c) => c.id === prevId);
+        const nextIdx = (curIdx + 1) % criteria.length;
+        return criteria[nextIdx].id;
+      });
+    }, 4500);
+    return () => clearInterval(timer);
+  }, [isUserInteracted, isSimulatingProbe, criteria]);
 
-  const handleSimulateAnswer = () => {
-    setIsSimulatingDeficit(true);
+  const handleSelectCriterion = (id: number) => {
+    setIsUserInteracted(true);
+    setSelectedCriterionId(id);
+  };
+
+  const handleSimulateRaftProbe = () => {
+    setIsUserInteracted(true);
+    setIsSimulatingProbe(true);
     setTimeout(() => {
       setCriteria((prev) =>
         prev.map((c) =>
@@ -102,506 +150,348 @@ export default function CoverageDeepDive() {
             ? {
                 ...c,
                 cosineSim: 0.892,
+                percentage: 89.2,
                 resolved: true,
-                notes: "Resolved via Joint Consensus Partition Answer",
+                notes: "Resolved to 89.2% via Joint Consensus Partition Response (Simulated).",
               }
             : c
         )
       );
-      setSelectedCriterion((prev) => ({
-        ...prev,
-        cosineSim: 0.892,
-        resolved: true,
-        notes: "Resolved via Joint Consensus Partition Answer",
-      }));
-      setIsSimulatingDeficit(false);
+      setIsSimulatingProbe(false);
     }, 700);
   };
 
-  const handleResetDeficit = () => {
-    setCriteria(initialCriteria);
-    setSelectedCriterion(initialCriteria[1]);
-  };
-
-  const runRagRace = () => {
-    if (isRacing) return;
-    setIsRacing(true);
-    setSequentialProgress(0);
-    setSpeculativeProgress(0);
-    setRaceElapsedMs(0);
-
-    const startTime = Date.now();
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      setRaceElapsedMs(elapsed);
-
-      // Speculative reaches 100% in ~742ms
-      const spec = Math.min(100, (elapsed / 742) * 100);
-      setSpeculativeProgress(spec);
-
-      // Sequential reaches 100% in ~2140ms
-      const seq = Math.min(100, (elapsed / 2140) * 100);
-      setSequentialProgress(seq);
-
-      if (elapsed >= 2200) {
-        clearInterval(interval);
-        setIsRacing(false);
-      }
-    }, 40);
-  };
-
   return (
-    <section className="py-28 lg:py-40 hairline-b" data-purpose="deep-dive-modules" id="coverage">
-      <div className="max-w-7xl mx-auto px-6 lg:px-12">
-        {/* Section Header with Curatorial Framing */}
-        <div className="flex flex-col md:flex-row md:items-end justify-between mb-20 pb-8 hairline-b">
-          <div>
-            <div className="flex items-center gap-3 font-mono text-xs text-sumi-muted uppercase tracking-widest mb-3">
-              <span className="folio-stamp">PL. 02 / FOLIO II</span>
-              <span>MATHEMATICAL REASONING ARCHITECTURE</span>
-            </div>
-            <h2 className="text-3xl sm:text-5xl font-light text-sumi tracking-tight">
-              Advanced AI Systems Engineering Deep-Dive
-            </h2>
-          </div>
-          <p className="text-sm font-mono text-sumi-secondary mt-4 md:mt-0 max-w-md leading-relaxed">
-            Replacing naive conversational wrappers with state machines, metric spaces, and speculative pipelining.
-          </p>
-        </div>
-
-        {/* Module 1: Deterministic Adaptive Coverage Engine */}
-        <div className="bg-white border border-hairline rounded-sm p-8 sm:p-14 mb-20 shadow-sm crosshair-corner interactive-plate" data-purpose="module-coverage-matrix">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
-            <div className="lg:col-span-6 space-y-6">
-              <div className="inline-flex items-center gap-2 font-mono text-xs font-semibold px-3 py-1.5 rounded bg-paper-subtle border border-hairline text-sumi">
-                <span className="text-sumi-muted">MODULE 01</span>
-                <span>/</span>
-                <span>STATE MACHINE CADENCE</span>
+    <SectionRackFocusStage maxBlur={12}>
+      <section className="py-20 lg:py-28 hairline-b bg-[#FAF8F5]" id="coverage" data-purpose="adaptive-coverage">
+        <div className="max-w-7xl 2xl:max-w-[1440px] mx-auto px-6 lg:px-12">
+          {/* Section Header */}
+          <BlurReveal blurPx={8} yOffset={18}>
+            <div className="flex flex-col md:flex-row md:items-baseline justify-between pb-6 mb-12 hairline-b gap-4">
+              <div className="space-y-1">
+                <div className="font-mono text-[10.5px] uppercase tracking-widest text-sumi-muted flex items-center gap-2">
+                  <span className="font-bold text-sumi">PL. 02 // FOLIO II</span>
+                  <span>—</span>
+                  <span>MATHEMATICAL COMPETENCE TOPOLOGY</span>
+                </div>
+                <h2 className="text-3xl sm:text-4xl font-light text-sumi tracking-tight">
+                  Adaptive Centroid Coverage &amp; Grounding
+                </h2>
               </div>
-              <h3 className="text-3xl font-normal text-sumi">
-                Deterministic Adaptive Coverage Engine
-              </h3>
-              <p className="text-sm text-sumi-secondary leading-relaxed">
-                Conventional AI interview bots ask pre-scripted linear questions regardless of candidate responses. Assessment Engine treats evaluation as a mathematical exploration of a multi-dimensional metric space.
-              </p>
-              <p className="text-sm text-sumi-secondary leading-relaxed">
-                As the candidate speaks, turns are embedded into a 768-dimensional manifold and compared via cosine distance to rubric criteria centroids:
-              </p>
-
-              {/* Formula Plate with Live Deficit Readout */}
-              <div className="p-5 bg-paper-card border border-hairline rounded font-mono text-xs text-sumi space-y-2">
-                <div className="text-[10px] text-sumi-muted tracking-widest flex justify-between">
-                  <span>// DEFICIT FORMULATION ARCHIVAL SPEC</span>
-                  <span className="text-sumi font-semibold">Active Deficit: {activeDeficit}</span>
-                </div>
-                <div className="text-sm font-semibold tracking-wide py-1 text-sumi">
-                  Deficit(c) = 1.0 - max( cos_sim(Turn_i, Centroid_c) )
-                </div>
-                <div className="text-[11px] text-sumi-muted leading-relaxed">
-                  Threshold τ = 0.65. Current deficit is{" "}
-                  <strong className={isDeficitOverThreshold ? "text-vermilion" : "text-emerald-700"}>
-                    {isDeficitOverThreshold ? "ABOVE τ (Requires Active Steer)" : "BELOW τ (Competency Satisfied)"}
-                  </strong>.
-                </div>
-              </div>
-
-              {/* Interactive Simulation Trigger */}
-              <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={handleSimulateAnswer}
-                  disabled={isSimulatingDeficit || criteria[1].resolved}
-                  className="px-4 py-2.5 bg-sumi text-white hover:bg-neutral-800 rounded font-mono text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
-                >
-                  {isSimulatingDeficit ? (
-                    <>
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                      <span>Computing Manifold...</span>
-                    </>
-                  ) : criteria[1].resolved ? (
-                    "✓ Consensus Deficit Resolved"
-                  ) : (
-                    "Simulate Candidate Answer →"
-                  )}
-                </button>
-                {criteria[1].resolved && (
-                  <button
-                    type="button"
-                    onClick={handleResetDeficit}
-                    className="px-3 py-2 bg-white border border-hairline hover:border-sumi rounded font-mono text-xs text-sumi transition-colors cursor-pointer"
-                  >
-                    Reset Matrix
-                  </button>
-                )}
+              <div className="font-mono text-xs text-sumi-secondary">
+                ALGORITHM: COSINE CENTROID TRACKING &bull; τ = 0.65 BOUND
               </div>
             </div>
+          </BlurReveal>
 
-            {/* Interactive Coverage Deficit Widget & Centroid Topology Radar */}
-            <div className="lg:col-span-6 bg-paper-card p-8 rounded border border-hairline font-mono text-xs space-y-6">
-              <div className="flex items-center justify-between pb-4 hairline-b">
-                <span className="font-bold text-sumi uppercase tracking-wider">
-                  DYNAMIC CENTROID TOPOLOGY &amp; COVERAGE WEAVER
-                </span>
-                <span className="text-[11px] text-emerald-600 font-semibold">
-                  SESSION #ARC-88194
-                </span>
-              </div>
+          {/* Dawnmill 50/50 Split: Left Isometric Architecture Diagram | Right Expandable Criterion Accordion */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
 
-              {/* Centroid Weaver Radar Visualization */}
-              <div className="bg-white p-5 rounded border border-hairline flex flex-col items-center justify-center relative">
-                <svg viewBox="0 0 320 240" className="w-full max-w-[280px] h-48 select-none">
-                  {/* Concentric Guide Webs */}
-                  <polygon points="160,20 280,120 160,220 40,120" fill="none" stroke="#e5e2da" strokeWidth="1" strokeDasharray="3 3" />
-                  <polygon points="160,50 240,120 160,190 80,120" fill="none" stroke="#e5e2da" strokeWidth="1" strokeDasharray="3 3" />
-                  <polygon points="160,80 200,120 160,160 120,120" fill="none" stroke="#e5e2da" strokeWidth="1" strokeDasharray="3 3" />
+            {/* Left Column: Sticky Isometric Vector Topology & Mathematical Grounding Card (6 cols) */}
+            <div className="lg:col-span-6 lg:sticky lg:top-24 space-y-5">
+              <div className="p-4 sm:p-5 bg-white border border-hairline rounded-sm shadow-xs space-y-4">
+                <IsometricCoverageDiagram
+                  activeIdx={activeIdx}
+                  activeTitle={selectedCriterion.name}
+                  activeMetric={`${selectedCriterion.percentage}% ${selectedCriterion.resolved ? "COVERED" : "DEFICIT"}`}
+                  isResolved={selectedCriterion.resolved}
+                  onSelectIdx={(idx) => handleSelectCriterion(criteria[idx].id)}
+                />
 
-                  {/* Cardinal Axis Guidelines */}
-                  <line x1="160" y1="20" x2="160" y2="220" stroke="#d5d0c5" strokeWidth="1" />
-                  <line x1="40" y1="120" x2="280" y2="120" stroke="#d5d0c5" strokeWidth="1" />
+                {/* Dawnmill-style Stage Caption & 4-Segment Progress Indicator */}
+                <div className="p-4 bg-[#FAF8F5] border border-hairline rounded-xs space-y-3">
+                  <div className="flex items-center justify-between gap-3 font-mono text-[11px]">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sumi-muted font-semibold shrink-0">
+                        0{activeIdx + 1} / 0{criteria.length}
+                      </span>
+                      <span className="font-bold text-sumi truncate">
+                        {selectedCriterion.name}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsUserInteracted((v) => !v)}
+                      className="text-[9.5px] uppercase tracking-wider px-2 py-0.5 rounded-xs border border-hairline bg-white text-sumi-secondary hover:text-sumi cursor-pointer shrink-0"
+                    >
+                      {isUserInteracted ? "Resume Cycle" : "Auto-Cycle"}
+                    </button>
+                  </div>
 
-                  {/* Dynamic Centroid Convex Hull Polygon */}
-                  {(() => {
-                    const c1Val = criteria[0].cosineSim; // Concurrency (Top)
-                    const c2Val = criteria[1].cosineSim; // Consensus (Right)
-                    const c3Val = criteria[2].cosineSim; // Triage (Bottom)
-                    const c4Val = 0.82; // Storage Substrates (Left)
+                  <p className="font-sans text-xs text-sumi-secondary leading-relaxed">
+                    {selectedCriterion.notes} Telemetry queries 768-dimensional embeddings via{" "}
+                    <code className="font-mono text-[11px] text-sumi bg-white px-1 py-0.5 rounded border border-hairline">
+                      pgvector
+                    </code>{" "}
+                    HNSW against threshold{" "}
+                    <span className="font-mono text-sumi font-semibold">&tau; = 0.65</span>.
+                  </p>
 
-                    const pTopX = 160;
-                    const pTopY = 120 - c1Val * 95;
-                    const pRightX = 160 + c2Val * 115;
-                    const pRightY = 120;
-                    const pBottomX = 160;
-                    const pBottomY = 120 + c3Val * 95;
-                    const pLeftX = 160 - c4Val * 115;
-                    const pLeftY = 120;
-
-                    const pointsStr = `${pTopX},${pTopY} ${pRightX},${pRightY} ${pBottomX},${pBottomY} ${pLeftX},${pLeftY}`;
-
-                    return (
-                      <>
-                        <polygon
-                          points={pointsStr}
-                          fill="rgba(16, 185, 129, 0.18)"
-                          stroke={criteria[1].resolved ? "#059669" : "#d94326"}
-                          strokeWidth="2"
-                          className="transition-all duration-500 ease-out"
-                        />
-                        {/* Interactive Vertices */}
-                        <circle cx={pTopX} cy={pTopY} r="4.5" fill="#141413" className="transition-all duration-500" />
-                        <circle cx={pRightX} cy={pRightY} r="5" fill={criteria[1].resolved ? "#059669" : "#d94326"} className="transition-all duration-500 animate-pulse" />
-                        <circle cx={pBottomX} cy={pBottomY} r="4.5" fill="#141413" className="transition-all duration-500" />
-                        <circle cx={pLeftX} cy={pLeftY} r="4.5" fill="#141413" />
-                      </>
-                    );
-                  })()}
-
-                  {/* Axis Node Labels */}
-                  <text x="160" y="14" textAnchor="middle" fontSize="9" fontFamily="'JetBrains Mono', monospace" fill="#78756e">
-                    CONCURRENCY (88%)
-                  </text>
-                  <text x="286" y="124" textAnchor="start" fontSize="9" fontFamily="'JetBrains Mono', monospace" fill={criteria[1].resolved ? "#059669" : "#d94326"} fontWeight="bold">
-                    RAFT ({Math.round(criteria[1].cosineSim * 100)}%)
-                  </text>
-                  <text x="160" y="234" textAnchor="middle" fontSize="9" fontFamily="'JetBrains Mono', monospace" fill="#78756e">
-                    INCIDENT TRIAGE (91%)
-                  </text>
-                  <text x="34" y="124" textAnchor="end" fontSize="9" fontFamily="'JetBrains Mono', monospace" fill="#78756e">
-                    STORAGE (82%)
-                  </text>
-                </svg>
-                <div className="w-full flex justify-between items-center text-[10px] text-sumi-muted pt-2 hairline-t">
-                  <span>METRIC SPACE: L2 COSINE MANIFOLD</span>
-                  <span className="text-sumi font-semibold">CLICK CRITERIA BELOW TO PIVOT</span>
+                  {/* 4 Animated Progress Segments */}
+                  <div className="grid grid-cols-4 gap-2 pt-1">
+                    {criteria.map((c, idx) => {
+                      const isCurrent = c.id === selectedCriterion.id;
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          aria-label={`Select coverage node ${idx + 1}: ${c.name}`}
+                          onClick={() => handleSelectCriterion(c.id)}
+                          className="h-1.5 w-full bg-[#E5E2DA] rounded-full overflow-hidden cursor-pointer relative"
+                        >
+                          {isCurrent && (
+                            <motion.div
+                              key={`${c.id}-${isUserInteracted ? "locked" : "auto"}`}
+                              initial={{ width: isUserInteracted ? "100%" : "0%" }}
+                              animate={{ width: "100%" }}
+                              transition={
+                                isUserInteracted
+                                  ? { duration: 0.25, ease: ARCHITECTURAL_EASE }
+                                  : { duration: 4.5, ease: "linear" }
+                              }
+                              className={`h-full rounded-full ${
+                                c.resolved ? "bg-[#1D4ED8]" : "bg-amber-600"
+                              }`}
+                            />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                {criteria.map((criterion) => {
-                  const percent = Math.round(criterion.cosineSim * 100);
-                  const isSelected = selectedCriterion.id === criterion.id;
-                  const isResolved = criterion.resolved;
+              {/* Compact Formula + SHA-256 Mandate Plates */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="p-4 bg-white border border-hairline rounded-sm space-y-2 font-mono text-xs shadow-xs">
+                  <div className="text-[10px] text-sumi-muted uppercase tracking-wider font-semibold">
+                    EQUATION 01 // THRESHOLD
+                  </div>
+                  <div className="text-sm text-sumi font-mono py-0.5">
+                    sim(u, v) = (u &bull; v) / (||u|| ||v||) &ge; &tau; = 0.65
+                  </div>
+                  <p className="font-sans text-[11.5px] text-sumi-secondary leading-relaxed">
+                    Any dimension below &tau; triggers targeted dynamic probing in the active turn stream.
+                  </p>
+                </div>
 
+                <div className="p-4 bg-white border border-hairline rounded-sm space-y-2 shadow-xs">
+                  <div className="flex items-center justify-between text-[10px] font-mono text-sumi-muted uppercase tracking-wider">
+                    <span className="font-bold text-sumi">GROUNDING MANDATE</span>
+                    <span className="text-emerald-700 font-semibold">SHA-256</span>
+                  </div>
+                  <p className="font-sans text-[11.5px] text-sumi-secondary leading-relaxed pt-1">
+                    Every rubric deduction is bound to verbatim candidate turns; unverified claims fail PostgreSQL schema validation.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Interactive Expandable Accordion Stack & Evidence Ledger (6 cols) */}
+            <ScrubParallaxLayer yRange={[20, -14]} className="lg:col-span-6 space-y-7">
+
+            {/* Expandable Competence Rubric Accordion */}
+            <div className="p-5 sm:p-6 bg-white border border-hairline rounded-sm shadow-xs space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline pb-3">
+                <span className="font-mono text-xs uppercase tracking-wider font-bold text-sumi">
+                  LIVE COMPETENCE RUBRIC GAUGE
+                </span>
+                <span className="font-mono text-[10.5px] text-sumi-muted">
+                  CLICK CRITERION TO EXPAND &amp; PROBE
+                </span>
+              </div>
+
+              <div className="space-y-2.5">
+                {criteria.map((c, idx) => {
+                  const isCritActive = selectedCriterion.id === c.id;
+                  const cDeficit = c.cosineSim < 0.65;
                   return (
                     <div
-                      key={criterion.id}
-                      onClick={() => setSelectedCriterion(criterion)}
-                      className={`p-3.5 rounded transition-all cursor-pointer border ${
-                        isSelected
-                          ? isResolved
-                            ? "bg-white border-emerald-400 shadow-xs"
-                            : "bg-white border-vermilion shadow-xs"
-                          : "bg-transparent border-transparent hover:bg-white hover:border-hairline"
+                      key={c.id}
+                      className={`border rounded-sm transition-colors overflow-hidden ${
+                        isCritActive
+                          ? "bg-[#FAF8F5] border-sumi/65 shadow-xs"
+                          : "bg-white border-hairline hover:border-sumi/35"
                       }`}
                     >
-                      <div className="flex justify-between text-xs mb-1.5">
-                        <span className="text-sumi font-semibold">{criterion.name}</span>
-                        <span
-                          className={`font-semibold ${
-                            isResolved ? "text-emerald-600" : "text-vermilion font-bold animate-pulse"
-                          }`}
-                        >
-                          {percent}% {isResolved ? "[RESOLVED]" : "[ACTIVE DEFICIT]"}
-                        </span>
-                      </div>
-                      <div className="w-full bg-paper-dark h-2 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full transition-all duration-700 ${
-                            isResolved ? "bg-emerald-600" : "bg-vermilion"
-                          }`}
-                          style={{ width: `${percent}%` }}
-                        ></div>
-                      </div>
-                      <div className="text-[10px] text-sumi-muted mt-2 flex justify-between">
-                        <span>Cosine Sim: {criterion.cosineSim.toFixed(3)} • {criterion.notes}</span>
-                        <span className="text-sumi font-medium">Click to Inspect</span>
-                      </div>
+                      <button
+                        type="button"
+                        data-magnetic="true"
+                        aria-expanded={isCritActive}
+                        onClick={() => handleSelectCriterion(c.id)}
+                        className="w-full p-4 text-left flex items-center justify-between gap-3 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span
+                            className={`w-6 h-6 rounded-xs font-mono text-[10.5px] font-bold flex items-center justify-center border shrink-0 transition-colors ${
+                              isCritActive
+                                ? "bg-sumi text-white border-sumi"
+                                : "bg-[#FAF8F5] text-sumi-muted border-hairline"
+                            }`}
+                          >
+                            0{idx + 1}
+                          </span>
+                          <span className="font-sans font-semibold text-sm text-sumi truncate">
+                            {c.name}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2.5 font-mono text-[10.5px] shrink-0">
+                          <span className="text-sumi-muted hidden sm:inline">
+                            sim {c.cosineSim.toFixed(3)}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-xs font-semibold border ${
+                              c.resolved
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : "bg-amber-50 text-amber-800 border-amber-200"
+                            }`}
+                          >
+                            {c.percentage}% {c.resolved ? "OK" : "DEFICIT"}
+                          </span>
+                        </div>
+                      </button>
+
+                      <AnimatePresence initial={false}>
+                        {isCritActive && (
+                          <motion.div
+                            key={`${c.id}-${c.resolved}`}
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.3, ease: ARCHITECTURAL_EASE }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 pt-2 border-t border-hairline/80 space-y-3 font-mono text-xs">
+                              <div className="space-y-1">
+                                <div className="h-2.5 w-full bg-[#E5E2DA] rounded-full overflow-hidden relative">
+                                  <div
+                                    className="absolute top-0 bottom-0 left-[65%] w-0.5 bg-red-500 z-10"
+                                    title="τ = 0.65 Threshold"
+                                  />
+                                  <motion.div
+                                    initial={{ width: "0%" }}
+                                    animate={{ width: `${c.percentage}%` }}
+                                    transition={{ type: "spring", stiffness: 220, damping: 28 }}
+                                    className={`h-full ${
+                                      c.resolved ? "bg-emerald-600" : "bg-amber-500"
+                                    }`}
+                                  />
+                                </div>
+                                <div className="flex justify-between text-[10px] text-sumi-muted pt-0.5">
+                                  <span>0.0</span>
+                                  <span className="text-red-700 font-semibold">
+                                    &tau; = 0.65 TARGET BOUND
+                                  </span>
+                                  <span>1.0</span>
+                                </div>
+                              </div>
+
+                              <div className="pt-1 space-y-1">
+                                <span className="text-[10px] text-sumi-muted uppercase tracking-wider block font-semibold">
+                                  AUTONOMOUS INJECTION PROBE:
+                                </span>
+                                <p className="font-sans text-xs text-sumi italic leading-relaxed bg-white p-3 border border-hairline rounded-xs">
+                                  &ldquo;{c.probe}&rdquo;
+                                </p>
+                              </div>
+
+                              {cDeficit && (
+                                <button
+                                  type="button"
+                                  onClick={handleSimulateRaftProbe}
+                                  disabled={isSimulatingProbe}
+                                  className="w-full py-2.5 bg-sumi text-white hover:bg-neutral-800 rounded-xs font-mono text-xs uppercase tracking-wider font-semibold transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
+                                >
+                                  <span>
+                                    {isSimulatingProbe
+                                      ? "Simulating Candidate Turn..."
+                                      : "Simulate Candidate Answer → Resolve Deficit"}
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   );
                 })}
               </div>
-
-              {/* Dynamic State Machine Output */}
-              <div className="pt-4 hairline-t space-y-2">
-                <div className="flex items-center justify-between text-[11px] text-sumi-muted">
-                  <span>EVALUATOR DECISION:</span>
-                  <span className="text-sumi font-bold tracking-wide">
-                    {criteria[1].resolved
-                      ? "ALL PRIMARY CRITERIA RESOLVED (COMPOSITE: 0.896)"
-                      : "STEER TO CRITERION 2 (τ = 0.65)"}
-                  </span>
-                </div>
-                <div className="p-3 bg-white rounded border border-hairline text-[11px] font-sans text-sumi-secondary leading-relaxed">
-                  <strong className="text-sumi font-mono text-[10px] uppercase">Active Probe: </strong>
-                  <em>&quot;{selectedCriterion.probe}&quot;</em>
-                </div>
-              </div>
             </div>
-          </div>
-        </div>
 
-        {/* Module 2: Speculative RAG Prefetching with pgvector */}
-        <div
-          className="bg-white border border-hairline rounded-sm p-8 sm:p-14 mb-20 shadow-sm crosshair-corner interactive-plate"
-          data-purpose="module-speculative-rag"
-          id="speculative-rag"
-        >
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
-            <div className="lg:col-span-6 space-y-6">
-              <div className="inline-flex items-center gap-2 font-mono text-xs font-semibold px-3 py-1.5 rounded bg-paper-subtle border border-hairline text-sumi">
-                <span className="text-sumi-muted">MODULE 02</span>
-                <span>/</span>
-                <span>LATENCY ABSTRACTION</span>
-              </div>
-              <h3 className="text-3xl font-normal text-sumi">
-                Speculative RAG Prefetching with pgvector
-              </h3>
-              <p className="text-sm text-sumi-secondary leading-relaxed">
-                Standard conversational RAG waits until the user finishes talking, transcribes the entire audio block, runs an embedding model, queries the database, and only then starts LLM synthesis. This incurs a fatal 2,000ms+ latency tax.
-              </p>
-              <p className="text-sm text-sumi-secondary leading-relaxed">
-                Assessment Engine monitors interim STT tokens while the candidate is still speaking. At token 12, a background coroutine performs a tentative HNSW vector lookup against the candidate’s code blueprints and rubrics, pre-warming the Redis turn cache.
-              </p>
-
-              <div className="grid grid-cols-2 gap-4 pt-3 font-mono text-xs">
-                <div className="p-4 bg-paper-subtle rounded border border-hairline">
-                  <div className="text-[10px] text-sumi-muted uppercase tracking-wider">
-                    Sequential RAG
-                  </div>
-                  <div className="text-xl font-bold text-sumi mt-1">2,140ms</div>
-                  <div className="text-[11px] text-sumi-muted mt-0.5">Post-turn freeze</div>
-                </div>
-                <div className="p-4 bg-emerald-50 rounded border border-emerald-200">
-                  <div className="text-[10px] text-emerald-700 uppercase tracking-wider font-bold">
-                    Predictive Prefetch
-                  </div>
-                  <div className="text-xl font-bold text-emerald-800 mt-1">0ms Perceived</div>
-                  <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Cache pre-warmed</div>
+            {/* Verified Transcript Evidence Dossier */}
+            <div className="p-6 bg-white border border-hairline rounded-sm shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-hairline pb-3">
+                <span className="font-mono text-xs uppercase tracking-wider font-bold text-sumi">
+                  GROUNDED EVIDENCE CITATION EXHIBIT
+                </span>
+                <div className="flex items-center gap-1 p-0.5 bg-[#FAF8F5] border border-hairline rounded-xs">
+                  {exhibits.map((ex) => {
+                    const isExActive = activeExhibit.id === ex.id;
+                    return (
+                      <button
+                        key={ex.id}
+                        type="button"
+                        onClick={() => setActiveExhibit(ex)}
+                        className={`relative px-2.5 py-1 font-mono text-[10px] uppercase rounded-xs transition-colors cursor-pointer ${
+                          isExActive
+                            ? "text-white font-bold"
+                            : "text-sumi-secondary hover:text-sumi"
+                        }`}
+                      >
+                        {isExActive && (
+                          <motion.span
+                            layoutId="exhibit-tab-pill"
+                            transition={APPLE_SPRING}
+                            className="absolute inset-0 bg-sumi rounded-xs"
+                          />
+                        )}
+                        <span className="relative z-10">{ex.id}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Trigger Benchmark Race Button */}
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={runRagRace}
-                  disabled={isRacing}
-                  className="px-4 py-2.5 bg-sumi text-white hover:bg-neutral-800 rounded font-mono text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50"
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={activeExhibit.id}
+                  initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
+                  animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                  exit={{ opacity: 0, y: -8, filter: "blur(6px)" }}
+                  transition={{ duration: 0.3, ease: ARCHITECTURAL_EASE }}
+                  className="space-y-3 font-mono text-xs"
                 >
-                  <span className={`w-2 h-2 rounded-full ${isRacing ? "bg-emerald-400 animate-ping" : "bg-emerald-400"}`}></span>
-                  <span>{isRacing ? `Racing Pipeline (${raceElapsedMs}ms)...` : "▶ Trigger Real-Time Benchmark Race"}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Visual Timeline Comparison with Live Animated Race */}
-            <div className="lg:col-span-6 bg-[#141413] text-paper p-8 rounded font-mono text-xs space-y-6">
-              <div className="text-xs uppercase tracking-widest text-neutral-400 font-bold border-b border-neutral-800 pb-3 flex justify-between items-center">
-                <span>TIMELINE EXECUTION PARADIGM</span>
-                <span className="text-[10px] text-emerald-400 font-normal">
-                  {isRacing ? `ELAPSED: ${raceElapsedMs}ms` : "REAL-TIME CONCURRENCY"}
-                </span>
-              </div>
-
-              {/* Standard Sequential Timeline */}
-              <div className="space-y-2">
-                <div className="flex justify-between text-[11px] text-neutral-400">
-                  <span>Standard Sequential Architecture (High Latency)</span>
-                  <span className="text-amber-400 font-bold">{Math.round(sequentialProgress)}%</span>
-                </div>
-                <div className="relative h-8 rounded overflow-hidden text-[10px] font-bold text-center leading-8 bg-neutral-800">
-                  <div
-                    className="flex h-full transition-all duration-75"
-                    style={{ width: `${sequentialProgress}%` }}
-                  >
-                    <div className="w-1/3 bg-neutral-700 text-neutral-300">Speech</div>
-                    <div className="w-1/6 bg-amber-700 text-amber-100">STT</div>
-                    <div className="w-1/6 bg-rose-800 text-rose-100">Embed</div>
-                    <div className="w-1/6 bg-indigo-800 text-indigo-100">RAG</div>
-                    <div className="w-1/6 bg-emerald-800 text-emerald-100">TTS</div>
-                  </div>
-                </div>
-                <div className="text-right text-[10px] text-vermilion">
-                  Total Turnaround: 2,050ms pause after speech
-                </div>
-              </div>
-
-              {/* Speculative Pipelining Timeline */}
-              <div className="pt-5 border-t border-neutral-800 space-y-3">
-                <div className="flex justify-between text-[11px] text-emerald-400 font-bold">
-                  <span>Assessment Engine Speculative Pipeline (Concurrent)</span>
-                  <span className="text-emerald-400">{Math.round(speculativeProgress)}%</span>
-                </div>
-                <div className="space-y-1.5">
-                  <div className="relative h-8 rounded overflow-hidden text-[10px] font-bold text-center leading-8 bg-neutral-800">
-                    <div
-                      className="flex h-full transition-all duration-75"
-                      style={{ width: `${speculativeProgress}%` }}
-                    >
-                      <div className="w-3/4 bg-neutral-700 text-neutral-200">Candidate Speech Stream</div>
-                      <div className="w-1/4 bg-emerald-600 text-white animate-pulse">TTS Pipelining</div>
-                    </div>
-                  </div>
-                  {/* Parallel Prefetch Track */}
-                  <div className="flex h-6 rounded overflow-hidden text-[9px] font-mono text-center leading-6 ml-[35%] w-[65%]">
-                    <div className="w-1/2 bg-emerald-900 border-r border-emerald-700 text-emerald-200">
-                      Interim Prefetch &amp; HNSW Warm
-                    </div>
-                    <div className="w-1/2 bg-emerald-800 text-emerald-100">
-                      Groq LLM 1st Token (210ms)
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right text-[10px] text-emerald-400 font-bold">
-                  Effective Pause: &lt;742ms (True Conversational Cadence)
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Module 3: Bounded Scatter-Gather Evaluation Worker */}
-        <div
-          className="bg-white border border-hairline rounded-sm p-8 sm:p-14 shadow-sm crosshair-corner interactive-plate"
-          data-purpose="module-scatter-gather"
-          id="scatter-gather"
-        >
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
-            <div className="lg:col-span-6 space-y-6">
-              <div className="inline-flex items-center gap-2 font-mono text-xs font-semibold px-3 py-1.5 rounded bg-paper-subtle border border-hairline text-sumi">
-                <span className="text-sumi-muted">MODULE 03</span>
-                <span>/</span>
-                <span>EVALUATION RIGOR</span>
-              </div>
-              <h3 className="text-3xl font-normal text-sumi">
-                Bounded Scatter-Gather Evaluation Worker
-              </h3>
-              <p className="text-sm text-sumi-secondary leading-relaxed">
-                Why do standard LLM evaluations produce fluffy, unusable recruiter reports? Because single-prompt LLM evaluation suffers from extreme recency bias, prompt dilution, and unverifiable hallucinations.
-              </p>
-              <p className="text-sm text-sumi-secondary leading-relaxed">
-                Upon session termination, our coordinator fans out 5 specialized, isolated evaluation workers across discrete architectural domains. Each worker must supply exact verbatim substring quotes from the immutable session ledger:
-              </p>
-              <ul className="text-xs font-mono text-sumi space-y-2.5 list-disc list-inside">
-                <li>
-                  <strong className="text-sumi">Deterministic Substring Token Matcher:</strong> Rejects any review citing phrases not present in the Postgres turn record.
-                </li>
-                <li>
-                  <strong className="text-sumi">Curatorial Monograph Essay:</strong> Produces high-density technical analysis rather than vague checkboxes.
-                </li>
-                <li>
-                  <strong className="text-sumi">Tamper-Proof SHA-256 Seal:</strong> Cryptographically locks the assessment against retroactive alteration.
-                </li>
-              </ul>
-
-              {/* Exhibit Selector Buttons */}
-              <div className="pt-2">
-                <span className="text-[10px] font-mono uppercase text-sumi-muted tracking-wider block mb-2">
-                  Select Grounded Exhibit to Inspect:
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {exhibits.map((ex) => (
-                    <button
-                      key={ex.id}
-                      type="button"
-                      onClick={() => setActiveExhibit(ex)}
-                      className={`px-3 py-1.5 rounded text-xs font-mono transition-colors cursor-pointer border ${
-                        activeExhibit.id === ex.id
-                          ? "bg-sumi text-white border-sumi font-semibold"
-                          : "bg-paper-card text-sumi border-hairline hover:border-sumi"
-                      }`}
-                    >
-                      {ex.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Interactive Dossier Card Preview */}
-            <div className="lg:col-span-6 bg-paper-card p-8 rounded border border-hairline font-mono text-xs space-y-5">
-              <div className="flex items-center justify-between pb-4 hairline-b">
-                <div className="flex items-center gap-2">
-                  <span className="folio-stamp">{activeExhibit.label}</span>
-                  <span className="font-bold text-sumi uppercase">
-                    {activeExhibit.title}
+                <div className="flex items-baseline justify-between text-sumi">
+                  <span className="font-bold text-sm">{activeExhibit.topic}</span>
+                  <span className="font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                    SCORE: {activeExhibit.score}
                   </span>
                 </div>
-                <span className="text-sumi font-semibold bg-white px-2.5 py-1 rounded border border-hairline">
-                  RATING: {activeExhibit.rating}
-                </span>
-              </div>
 
-              {/* Monograph Snippet */}
-              <div className="space-y-4 font-sans text-xs text-sumi leading-relaxed">
-                <div className="font-mono text-[10px] text-sumi-muted uppercase tracking-widest">
-                  CRITIQUE ESSAY — SYSTEMIC RIGOR &amp; TOPOLOGY OF FAILURE DOMAINS
+                <div className="text-[11px] text-sumi-muted flex items-center gap-3">
+                  <span>RECORD: {activeExhibit.turn}</span>
+                  <span>&bull;</span>
+                  <span>REF: {activeExhibit.reference}</span>
                 </div>
-                <p className="font-serif text-sm italic leading-relaxed text-sumi-secondary">
-                  &quot;{activeExhibit.essay}&quot;
+
+                {/* Verbatim Highlighted Quote */}
+                <div className="p-4 bg-[#F4F1EA] border-l-2 border-emerald-600 rounded-r-xs font-serif text-sm italic text-sumi leading-relaxed">
+                  &ldquo;{activeExhibit.quote}&rdquo;
+                </div>
+
+                <p className="font-sans text-xs text-sumi-secondary leading-relaxed pt-1">
+                  {activeExhibit.essay}
                 </p>
-
-                {/* Verified Substring Quote Anchor */}
-                <div className="p-4 bg-white border-l-2 border-emerald-600 rounded-r font-mono text-[11px] text-sumi space-y-1.5 shadow-xs">
-                  <div className="text-[10px] text-emerald-700 font-bold flex items-center justify-between">
-                    <span>EVIDENCE BOUND [{activeExhibit.turn}]</span>
-                    <span className="text-[10px] text-sumi-muted">PGVECTOR EXACT SUBSTRING</span>
-                  </div>
-                  <div className="text-sumi leading-relaxed">
-                    &quot;{activeExhibit.quote}&quot;
-                  </div>
-                </div>
-              </div>
-
-              <div className="pt-4 hairline-t flex items-center justify-between text-[10px] text-sumi-muted font-mono">
-                <span>HASH: SHA-256 [{activeExhibit.sha}]</span>
-                <span className="text-emerald-700 font-semibold tracking-wide">
-                  100% EVIDENCE GROUNDED // VERIFIED
-                </span>
-              </div>
+                </motion.div>
+              </AnimatePresence>
             </div>
+
+            </ScrubParallaxLayer>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </SectionRackFocusStage>
   );
 }
